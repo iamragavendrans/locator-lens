@@ -51,7 +51,7 @@ chrome.runtime.onConnect.addListener(port => {
     /* Relay commands to content script */
     const forwarded = [
       'startPicking', 'stopPicking', 'setPassive',
-      'flashLocator', 'clearFlash', 'validateSelector'
+      'flashLocator', 'clearFlash', 'validateSelector', 'cycleMatch'
     ];
 
     if (forwarded.includes(msg.type)) {
