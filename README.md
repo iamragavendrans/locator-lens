@@ -1,112 +1,121 @@
 # LocatorLens
 
-**Instant locator generation and ranking for every web element.**
+**LocatorLens is a Chrome side-panel extension for capturing page elements and generating ranked automation locators without reloading the page.**
 
-LocatorLens is a Chrome extension built for QA engineers, automation developers, and web scrapers. Click any element on any website and instantly get a ranked list of locators — CSS selectors, XPath expressions, and framework-ready code.
+It is designed for QA engineers, test automation developers, and scraping workflows. The extension listens to user interaction on any regular web page, analyzes the selected element, and returns multiple CSS/XPath locator strategies plus framework-specific copy formats.
 
-## Features
+## Current Product Capabilities
 
-### Core Modes
+### Capture modes
 
 | Mode | What it does |
-|------|-------------|
-| **Pick** | Click the Pick button, then click any element. The extension highlights it and generates every possible locator. |
-| **Passive** | Toggle on and every regular page click auto-generates locators in the side panel. No mode switching needed. |
-| **Lock** | Freeze the current results so further clicks don't overwrite them. Useful when copying locators while navigating. |
+|---|---|
+| **Pick Element** | Starts manual pick mode, changes the page cursor to a crosshair, previews the hovered element, and captures on click. |
+| **Passive** | Captures every regular page click without blocking the click. |
+| **Lock** | Freezes the current panel result so new picks/captures are ignored until unlocked. |
+| **Stack** | Opens the stack section so you can collect multiple elements for export. |
 
-### Locator Engine
+### Panel sections
 
-LocatorLens generates locators across **15 strategies**:
+The side panel is organized into five sections:
 
-- **ID** — `#login-btn`, `//*[@id='login-btn']`
-- **Name** — `[name="email"]`
-- **Test attributes** — `[data-testid="submit"]`, `[data-cy="…"]`, `[data-qa="…"]`
-- **ARIA** — `[aria-label="Close"]`, `[role="dialog"]`
-- **Placeholder / Title / Alt** — form and media attributes
-- **Href** — link-specific selectors
-- **Text** — exact and `contains()` with smart phrase extraction for long text
-- **Classes** — static classes ranked higher, dynamic classes flagged with warnings
-- **Child anchor** — resilient locators via child `<a>`, `<b>`, `<strong>`, `<img>` elements
-- **Hierarchy** — parent ID, grandparent paths
-- **Positional** — `nth-child`, `nth-of-type`
-- **Absolute** — full XPath and CSS path (always available as fallback)
+1. **Reference** — quick-copy values such as ID, class, tag, name, aria-label, CSS path, and relative XPath.
+2. **Properties** — identity badges, attributes, stable/dynamic classes, computed styles, bounds, and text content.
+3. **Locators** — ranked selectors grouped into Stable / Moderate / Fragile tiers, with flash, highlight, raw copy, framework copy, and multi-match navigation.
+4. **Stack** — collect multiple elements and export them as Playwright TS, Selenium Java, Cypress JS, WebdriverIO, Puppeteer, TestCafe, or Raw JSON.
+5. **Live Validator** — validate CSS/XPath selectors with debounce, preview up to five matches, and flash/highlight matches.
 
-Each locator is scored 0–100 and grouped into **Stable** (≥75), **Moderate** (45–74), and **Fragile** (<45) tiers.
+Section open/closed state is persisted in `localStorage` under `ll4v4_sections`.
 
-### Copy for Any Framework
+### Locator strategies
 
-One-click copy formatted for:
-- Selenium (Java / Python)
-- Playwright
-- Cypress
-- Puppeteer
-- WebdriverIO
-- TestCafe
-- Robot Framework
+LocatorLens currently generates ranked locator candidates from combinations of:
 
-### Live Validator
-
-Paste any CSS or XPath selector and test it against the current page in real time.
+- test attributes such as `data-testid`, `data-test`, `data-cy`, `data-qa`, and related variants
+- ARIA attributes and role/text combinations
+- stable IDs and fallback auto-generated ID patterns
+- name / placeholder / alt / title / href / value attributes
+- stable classes, dynamic classes, and scoped class fallbacks
+- exact text, normalized text, and text-contains locators
+- link text and partial link text
+- child-anchor and child-bold-text strategies
+- ancestor/descendant and parent/child hierarchy locators
+- sibling-based locators
+- CSS paths, relative XPath, position-based XPath, and absolute XPath
 
 ## Installation
 
-### From GitHub Releases (recommended)
+### Load unpacked locally
 
-1. Go to the [Releases](../../releases) page
-2. Download the latest `.zip` file
-3. Unzip to a folder on your machine
-4. Open `chrome://extensions` in Chrome
-5. Enable **Developer mode** (top-right toggle)
-6. Click **Load unpacked** → select the unzipped folder
+1. Clone this repository.
+2. Open `chrome://extensions` in Chrome.
+3. Enable **Developer mode**.
+4. Click **Load unpacked**.
+5. Select the repository folder.
 
-### Build from source
+### Build artifacts from GitHub Actions
+
+The repository now includes a GitHub Actions workflow at `.github/workflows/build-extension.yml`.
+
+- On every push to `main` or `master`, GitHub Actions builds `dist/locatorlens.zip` and uploads it as a workflow artifact.
+- On pull requests, the same packaging validation runs.
+- On version tags like `v5.0.1`, the workflow uploads release artifacts to GitHub Releases.
+- If the repository secret `CHROME_EXTENSION_PRIVATE_KEY` is configured, the workflow also signs and builds `dist/locatorlens.crx`.
+- If that secret is **not** configured, the workflow still produces the ZIP, but the CRX step is skipped.
+
+## Why the workflow was not auto-triggering before
+
+The previous README claimed that GitHub Actions would automatically build and publish a `.crx`/`.zip`, but the repository did **not** actually contain a workflow under `.github/workflows/`. Because there was no workflow file committed, GitHub Actions had nothing to trigger on push or tag events.
+
+In addition, a CRX build requires a signing key. Even with a workflow present, GitHub cannot produce a signed `.crx` unless the repository has a private signing key available through secrets.
+
+## Required GitHub secret for CRX output
+
+To enable automatic `.crx` generation, add this repository secret:
+
+- `CHROME_EXTENSION_PRIVATE_KEY` — the PEM-encoded private key used to sign the extension ZIP before wrapping it into a CRX3 package.
+
+Once that secret is configured, pushes to `main`/`master` and `v*` tags will automatically build the ZIP and signed CRX artifacts.
+
+## Release flow
+
+1. Update `version` in `manifest.json`.
+2. Commit the change.
+3. Push the branch.
+4. Create and push a tag such as `v5.0.1`.
+5. GitHub Actions will build the extension package(s) and attach them to the tagged release.
+
+## Project structure
+
+```text
+locator-lens/
+├── manifest.json
+├── background.js
+├── content.js
+├── content.css
+├── panel.html
+├── panel.css
+├── panel.js
+├── build_crx3.py
+├── icons/
+│   ├── icon16.png
+│   ├── icon48.png
+│   └── icon128.png
+└── .github/
+    └── workflows/
+        └── build-extension.yml
+```
+
+## Local checks
+
+Useful local checks while iterating:
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/locatorlens.git
-cd locatorlens
-# No build step needed — it's plain JS
-# Load the repo folder directly as an unpacked extension
+node --check panel.js
+node --check content.js
+node --check background.js
+python -m py_compile build_crx3.py
 ```
-
-## Releasing a New Version
-
-1. Update `version` in `manifest.json`
-2. Commit and tag:
-   ```bash
-   git add -A
-   git commit -m "Release v5.1.0"
-   git tag v5.1.0
-   git push origin main --tags
-   ```
-3. GitHub Actions automatically builds and publishes a `.crx` and `.zip` to [Releases](../../releases)
-
-## Project Structure
-
-```
-locatorlens/
-├── manifest.json       # Extension manifest (MV3)
-├── background.js       # Service worker — message relay, script injection
-├── content.js          # Content script — locator engine, picker, passive mode
-├── content.css         # Overlay styles injected into pages
-├── panel.html          # Side panel markup
-├── panel.css           # Side panel styles (dark theme)
-├── panel.js            # Side panel logic — rendering, lock, framework copy
-├── build_crx3.py       # CRX3 packaging script (used by CI)
-├── icons/              # Extension icons (16, 48, 128px)
-├── LICENSE             # MIT
-└── .github/workflows/
-    └── release.yml     # Auto-build CRX on tag push
-```
-
-## Contributing
-
-Contributions welcome! Please open an issue first for major changes.
-
-1. Fork the repo
-2. Create a feature branch (`git checkout -b feat/my-feature`)
-3. Make your changes
-4. Test by loading the unpacked extension in Chrome
-5. Submit a pull request
 
 ## License
 
