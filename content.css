@@ -1,0 +1,9 @@
+/* LocatorLens v5 — content overlay styles */
+#__ll5_overlay__ {
+  pointer-events: none !important;
+  z-index: 2147483646 !important;
+  box-sizing: border-box !important;
+}
+#__ll5_tag__ {
+  pointer-events: none !important;
+}
