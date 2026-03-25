@@ -1,8 +1,12 @@
-name: Build & Release CRX
+name: Build CRX
 on:
   push:
-    tags: ['v*']
+    branches:
+      - main
+      - master
   workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * *'
 permissions:
   contents: write
 jobs:
@@ -34,6 +38,13 @@ jobs:
           echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
           echo "crx=$CRX" >> "$GITHUB_OUTPUT"
           ls -lh "$ZIP" "$CRX"
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.name }}-${{ steps.meta.outputs.version }}
+          path: |
+            ${{ steps.build.outputs.zip }}
+            ${{ steps.build.outputs.crx }}
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -45,6 +56,17 @@ jobs:
           files: |
             ${{ steps.build.outputs.zip }}
             ${{ steps.build.outputs.crx }}
+      - name: Cleanup Old Releases
+        run: |
+          # Keep only the 2 most recent releases, delete older ones
+          OLD_RELEASES=$(gh api repos/${{ github.repository }}/releases --paginate \
+            -q '.[] | .id' | tail -n +3)
+          for RELEASE_ID in $OLD_RELEASES; do
+            if [ -n "$RELEASE_ID" ]; then
+              echo "Deleting release $RELEASE_ID"
+              gh api repos/${{ github.repository }}/releases/$RELEASE_ID -X DELETE
+            fi
+          done
       - name: Cleanup
         if: always()
         run: rm -f key.pem pub.der sig.der
