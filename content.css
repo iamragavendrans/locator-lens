@@ -1,28 +1,27 @@
-#__ll5_overlay__ {
-  pointer-events: none !important;
-  z-index: 2147483646 !important;
-  box-sizing: border-box !important;
-}
-#__ll5_tag__ {
-  pointer-events: none !important;
-}
-.__ll4flash__ {
+/* LocatorLens v5 — content styles injected into page (PRD §7) */
+#__ll5ov__, #__ll5tg__ { pointer-events: none !important; }
+
+/* PRD §7.1 — Flash mode: amber pulsing outline */
+.__ll5flash__ {
   outline: 2px solid #f59e0b !important;
   outline-offset: 1px !important;
-  box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.25) !important;
-  animation: ll4flashPulse 0.8s infinite !important;
+  z-index: 2147483640 !important;
+  animation: __ll5pulse 0.8s infinite ease-in-out !important;
 }
-@keyframes ll4flashPulse {
-  0%, 100% { outline-color: transparent; box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); }
-  50% { outline-color: #f59e0b; box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.25); }
+@keyframes __ll5pulse {
+  0%, 100% { outline-color: #f59e0b; box-shadow: 0 0 6px rgba(245,158,11,0.4); }
+  50%      { outline-color: transparent; box-shadow: none; }
 }
-.__ll4dim__ {
+
+/* PRD §7.2 — Highlight mode */
+.__ll5dim__ {
   opacity: 0.2 !important;
-  transition: opacity 0.15s ease !important;
+  transition: opacity 0.15s !important;
 }
-.__ll4highlight__ {
+.__ll5hl__ {
   opacity: 1 !important;
   outline: 2px solid #6366f1 !important;
   outline-offset: 2px !important;
-  box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.25) !important;
+  box-shadow: 0 0 0 4px rgba(99,102,241,0.25) !important;
+  z-index: 2147483642 !important;
 }

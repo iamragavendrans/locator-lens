@@ -1,616 +1,663 @@
+// LocatorLens v5 — Panel JS (PRD §6–10)
 'use strict';
 
-const SECTION_KEY = 'll4v4_sections';
-const DEFAULT_SECTIONS = {
-  'sec-reference': true,
-  'sec-props': false,
-  'sec-locators': true,
-  'sec-stack': false,
-  'sec-validator': false
-};
-const POM_FORMATS = ['Playwright TS', 'Selenium Java', 'Cypress JS', 'WebdriverIO', 'Puppeteer', 'TestCafe', 'Raw JSON'];
-const PRIORITY_ATTRS = new Set(['id', 'name', 'aria-label', 'data-testid', 'data-test', 'data-test-id', 'data-cy', 'data-qa', 'placeholder', 'href', 'value', 'role', 'type']);
-
-const st = {
-  picking: false,
-  passive: false,
-  locked: false,
-  payload: null,
-  stack: [],
-  activeLocatorId: null,
-  activeLocatorMode: null,
-  validatorState: { selector: '', selectorType: 'css', count: 0, error: null, preview: [] },
-  validatorMode: 'flash',
-  validatorActive: false,
-  validateTimer: null,
-  sections: loadSections()
-};
-
-const port = chrome.runtime.connect({ name: 'locatorlens' });
 const $ = id => document.getElementById(id);
-const $$ = sel => Array.from(document.querySelectorAll(sel));
+const port = chrome.runtime.connect({ name: 'locatorlens' });
 
-const btnPick = $('btn-pick');
-const btnPassive = $('btn-passive');
-const btnLock = $('btn-lock');
-const btnUnlock = $('btn-unlock');
-const btnStack = $('btn-stack');
-const btnAddCurrent = $('btn-add-current');
-const btnExportPom = $('btn-export-pom');
-const btnClearStack = $('btn-clear-stack');
-const pomPicker = $('pom-picker');
-const pomOutput = $('pom-output');
-const valInput = $('val-input');
-const valFlashBtn = $('val-flash');
+const st = { picking: false, passive: false, locked: false, payload: null, stack: [], activeFlash: null };
 
-function loadSections() {
-  try {
-    return { ...DEFAULT_SECTIONS, ...(JSON.parse(localStorage.getItem(SECTION_KEY) || '{}')) };
-  } catch {
-    return { ...DEFAULT_SECTIONS };
-  }
+// ═══════════════════════════════════════════════════════
+//  PRD §10 — Section persistence
+// ═══════════════════════════════════════════════════════
+const SEC_KEY = 'll5_sections';
+function loadSectionState() {
+  try { return JSON.parse(localStorage.getItem(SEC_KEY)) || {}; } catch { return {}; }
 }
-
-function saveSections() {
-  localStorage.setItem(SECTION_KEY, JSON.stringify(st.sections));
+function saveSectionState() {
+  const state = {};
+  document.querySelectorAll('.sec').forEach(s => { state[s.id] = s.open; });
+  localStorage.setItem(SEC_KEY, JSON.stringify(state));
 }
-
-function showView(id) {
-  ['v-idle', 'v-picking', 'v-error', 'v-results'].forEach(viewId => { $(viewId).hidden = viewId !== id; });
-}
-
-function copyText(text, btnEl) {
-  return navigator.clipboard.writeText(text).then(() => {
-    if (!btnEl) return;
-    const prev = btnEl.textContent;
-    btnEl.textContent = 'Copied';
-    setTimeout(() => { btnEl.textContent = prev; }, 900);
-  });
-}
-
-function escHtml(str) {
-  const d = document.createElement('div');
-  d.textContent = String(str);
-  return d.innerHTML;
-}
-
-function cssString(value) {
-  return `[${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}]`;
-}
-
-function selectorToFramework(loc, format) {
-  const s = loc.selector;
-  const q = v => v.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-  const attrName = loc.meta?.attributeName;
-  const attrValue = loc.meta?.attributeValue;
-  const textValue = loc.meta?.textValue || attrValue || '';
-  const role = loc.meta?.role;
-  switch (format) {
-    case 'Playwright TS':
-      if (attrName === 'data-testid' || attrName === 'data-test' || attrName === 'data-test-id' || attrName === 'data-cy' || attrName === 'data-qa' || attrName === 'data-automation-id' || attrName === 'data-e2e') return `page.getByTestId('${q(attrValue)}')`;
-      if (attrName === 'aria-label') return `page.getByLabel('${q(attrValue)}')`;
-      if (attrName === 'placeholder') return `page.getByPlaceholder('${q(attrValue)}')`;
-      if (attrName === 'alt') return `page.getByAltText('${q(attrValue)}')`;
-      if (attrName === 'title') return `page.getByTitle('${q(attrValue)}')`;
-      if (loc.type === 'link-text') return `page.getByRole('link', { name: '${q(textValue)}' })`;
-      if (loc.category === 'text') return `page.getByText('${q(textValue)}')`;
-      if (role && textValue) return `page.getByRole('${q(role)}', { name: '${q(textValue)}' })`;
-      return loc.selectorType === 'xpath' ? `page.locator('xpath=${q(s)}')` : `page.locator('${q(s)}')`;
-    case 'Selenium Java':
-      if (loc.category === 'id' && attrValue) return `By.id("${attrValue.replace(/"/g, '\\"')}")`;
-      if (attrName === 'name') return `By.name("${attrValue.replace(/"/g, '\\"')}")`;
-      if (loc.type === 'link-text') return `By.linkText("${textValue.replace(/"/g, '\\"')}")`;
-      if (loc.type === 'partial-link-text') return `By.partialLinkText("${textValue.replace(/"/g, '\\"')}")`;
-      return loc.selectorType === 'xpath' ? `By.xpath("${s.replace(/"/g, '\\"')}")` : `By.cssSelector("${s.replace(/"/g, '\\"')}")`;
-    case 'Cypress JS':
-      if (attrName && attrValue && attrName.startsWith('data-')) return `cy.get('[${attrName}="${attrValue.replace(/"/g, '\\"')}"]')`;
-      if (loc.category === 'id' && attrValue) return `cy.get('#${attrValue.replace(/'/g, "\\'")}')`;
-      if (loc.type === 'link-text') return `cy.contains('a', '${q(textValue)}')`;
-      if (loc.category === 'text') return `cy.contains('${q(textValue)}')`;
-      return loc.selectorType === 'xpath' ? `cy.xpath('${q(s)}') // requires cypress-xpath` : `cy.get('${q(s)}')`;
-    case 'WebdriverIO':
-      if (loc.category === 'id' && attrValue) return `$('#${q(attrValue)}')`;
-      if (attrName === 'aria-label') return `$('aria/${q(attrValue)}')`;
-      if (loc.type === 'link-text') return `$('=${q(textValue)}')`;
-      return `$('${q(s)}')`;
-    case 'Puppeteer':
-      if (loc.category === 'text') return `page.$('::-p-text(${q(textValue)})')`;
-      return loc.selectorType === 'xpath' ? `page.$x('${q(s)}')` : `page.$('${q(s)}')`;
-    case 'TestCafe':
-      if (loc.category === 'id' && attrValue) return `Selector('#${q(attrValue)}')`;
-      if (attrName === 'name') return `Selector('[name="${attrValue.replace(/"/g, '\\"')}"]')`;
-      if (attrName && attrValue && attrName.startsWith('data-')) return `Selector('[${attrName}="${attrValue.replace(/"/g, '\\"')}"]')`;
-      if (loc.type === 'link-text') return `Selector('a').withText('${q(textValue)}')`;
-      if (loc.category === 'text') return `Selector('*').withText('${q(textValue)}')`;
-      return `Selector('${q(s)}')`;
-    case 'Raw JSON':
-      return JSON.stringify({ [toFieldName(loc.fieldSeed || loc.meta?.textValue || loc.meta?.attributeValue || loc.label || 'element')]: s }, null, 2);
-    default:
-      return s;
-  }
-}
-
-function updatePickBtn() {
-  btnPick.classList.toggle('active', st.picking);
-  btnPick.textContent = st.picking ? 'Stop' : 'Pick Element';
-}
-
-function updatePassiveBtn() {
-  btnPassive.classList.toggle('passive-on', st.passive);
-  btnPassive.textContent = st.passive ? 'Passive: ON' : 'Passive';
-}
-
-function updateLockUI() {
-  btnLock.classList.toggle('locked', st.locked);
-  btnLock.textContent = st.locked ? 'Locked' : 'Lock';
-  $('lock-banner').hidden = !st.locked;
-}
-
-function updateStackButton() {
-  btnStack.textContent = `Stack ${st.stack.length}`;
-  btnStack.classList.toggle('stack-active', !!st.sections['sec-stack']);
-}
-
 function applySectionState() {
-  Object.entries(st.sections).forEach(([id, open]) => {
-    const el = $(id);
-    if (el) el.open = !!open;
+  const saved = loadSectionState();
+  // PRD defaults: Reference=open, Properties=closed, Locators=open, Stack=closed, Validator=closed
+  const defaults = { 'sec-reference': true, 'sec-properties': false, 'sec-locators': true, 'sec-stack': false, 'sec-validator': false };
+  document.querySelectorAll('.sec').forEach(s => {
+    const open = saved[s.id] !== undefined ? saved[s.id] : (defaults[s.id] || false);
+    s.open = open;
   });
-  updateStackButton();
+}
+document.querySelectorAll('.sec').forEach(s => s.addEventListener('toggle', saveSectionState));
+applySectionState();
+
+// ═══════════════════════════════════════════════════════
+//  PRD §8 — Framework output templates
+// ═══════════════════════════════════════════════════════
+function fmtForFramework(fw, sel, tp, loc) {
+  // loc has: category, label, selector, selectorType, plus data from payload
+  const v = sel.replace(/'/g, "\\'");
+  const d = sel.replace(/"/g, '\\"');
+  switch (fw) {
+    case 'playwright': {
+      // PRD §8 Playwright TS: semantic methods
+      if (loc) {
+        const attrs = loc._attrs || {};
+        if (attrs['data-testid']) return `page.getByTestId('${attrs['data-testid']}')`;
+        if (attrs['aria-label']) return `page.getByLabel('${attrs['aria-label']}')`;
+        if (attrs['placeholder']) return `page.getByPlaceholder('${attrs['placeholder']}')`;
+        if (attrs['alt']) return `page.getByAltText('${attrs['alt']}')`;
+        if (attrs['title']) return `page.getByTitle('${attrs['title']}')`;
+        if (loc._role && loc._text) return `page.getByRole('${loc._role}', { name: '${loc._text.slice(0,50)}' })`;
+        if (loc._tag === 'a' && loc._text) return `page.getByRole('link', { name: '${loc._text.slice(0,50)}' })`;
+        if (loc._text && loc._text.length <= 60) return `page.getByText('${loc._text.slice(0,60)}')`;
+      }
+      return tp === 'xpath' ? `page.locator('xpath=${v}')` : `page.locator('${v}')`;
+    }
+    case 'selenium': {
+      if (loc && loc._attrs) {
+        if (loc._attrs.id && loc._stableId) return `driver.findElement(By.id("${loc._attrs.id}"))`;
+        if (loc._attrs.name) return `driver.findElement(By.name("${loc._attrs.name}"))`;
+        if (loc._tag === 'a' && loc._text) return `driver.findElement(By.linkText("${loc._text.slice(0,80)}"))`;
+      }
+      return tp === 'xpath' ? `driver.findElement(By.xpath("${d}"))` : `driver.findElement(By.cssSelector("${d}"))`;
+    }
+    case 'cypress': {
+      if (loc && loc._attrs) {
+        if (loc._attrs['data-testid']) return `cy.get('[data-testid="${loc._attrs['data-testid']}"]')`;
+        if (loc._attrs['data-cy']) return `cy.get('[data-cy="${loc._attrs['data-cy']}"]')`;
+        if (loc._attrs.id && loc._stableId) return `cy.get('#${loc._attrs.id}')`;
+      }
+      if (loc && loc._text && loc._tag === 'a') return `cy.contains('a', '${loc._text.slice(0,60)}')`;
+      if (loc && loc._text && loc._text.length <= 60) return `cy.contains('${loc._text.slice(0,60)}')`;
+      if (tp === 'xpath') return `cy.xpath('${v}') // requires cypress-xpath plugin`;
+      return `cy.get('${v}')`;
+    }
+    case 'wdio': {
+      if (loc && loc._attrs) {
+        if (loc._attrs.id && loc._stableId) return `$('#${loc._attrs.id}')`;
+        if (loc._attrs['aria-label']) return `$('aria/${loc._attrs['aria-label']}')`;
+      }
+      if (loc && loc._tag === 'a' && loc._text) return `$('=${loc._text.slice(0,60)}')`;
+      return tp === 'xpath' ? `$('${v}')` : `$('${v}')`;
+    }
+    case 'puppeteer': {
+      if (loc && loc._text && loc._text.length <= 60) return `page.$('::-p-text(${loc._text.slice(0,60)})')`;
+      return tp === 'xpath' ? `page.$x('${v}')` : `page.$('${v}')`;
+    }
+    case 'testcafe': {
+      if (loc && loc._attrs) {
+        if (loc._attrs['data-testid']) return `Selector('[data-testid="${loc._attrs['data-testid']}"]')`;
+        if (loc._attrs.id && loc._stableId) return `Selector('#${loc._attrs.id}')`;
+        if (loc._attrs.name) return `Selector('[name="${loc._attrs.name}"]')`;
+      }
+      if (loc && loc._tag === 'a' && loc._text) return `Selector('a').withText('${loc._text.slice(0,60)}')`;
+      if (loc && loc._text && loc._text.length <= 60) return `Selector('*').withText('${loc._text.slice(0,60)}')`;
+      return tp === 'css' ? `Selector('${v}')` : `// XPath not native in TestCafe`;
+    }
+    case 'robot': return tp === 'xpath' ? `xpath:${sel}` : `css:${sel}`;
+    case 'raw': default: return sel;
+  }
 }
 
-btnPick.addEventListener('click', () => {
-  st.picking = !st.picking;
-  updatePickBtn();
+const FW_LIST = [
+  { key: 'playwright', label: 'Playwright TS' },
+  { key: 'selenium',   label: 'Selenium Java' },
+  { key: 'cypress',    label: 'Cypress JS' },
+  { key: 'wdio',       label: 'WebdriverIO' },
+  { key: 'puppeteer',  label: 'Puppeteer' },
+  { key: 'testcafe',   label: 'TestCafe' },
+  { key: 'robot',      label: 'Robot Fw' },
+  { key: 'raw',        label: 'Raw' }
+];
+
+// ═══════════════════════════════════════════════════════
+//  VIEW SWITCHING
+// ═══════════════════════════════════════════════════════
+const views = ['v-idle', 'v-picking', 'v-error', 'v-results'];
+function showView(id) { views.forEach(v => $(v).style.display = 'none'); $(id).style.display = ''; }
+
+// ═══════════════════════════════════════════════════════
+//  UTILITY
+// ═══════════════════════════════════════════════════════
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function copyText(text, btn) {
+  navigator.clipboard.writeText(text).then(() => {
+    if (!btn) return; const p = btn.textContent; btn.textContent = '✓'; setTimeout(() => btn.textContent = p, 900);
+  });
+}
+
+// ═══════════════════════════════════════════════════════
+//  PICK (PRD §4.1)
+// ═══════════════════════════════════════════════════════
+$('btn-pick').addEventListener('click', () => {
+  st.picking = !st.picking; updatePickBtn();
   port.postMessage({ type: st.picking ? 'startPicking' : 'stopPicking' });
-  showView(st.picking ? 'v-picking' : st.payload ? 'v-results' : 'v-idle');
+  if (st.picking) showView('v-picking');
+  else if (st.payload) showView('v-results');
+  else showView('v-idle');
 });
 
-btnPassive.addEventListener('click', () => {
+function updatePickBtn() {
+  const b = $('btn-pick');
+  if (st.picking) { b.classList.add('active'); b.innerHTML = '■ Stop'; }
+  else { b.classList.remove('active'); b.innerHTML = `<svg width="11" height="11" viewBox="0 0 12 12" fill="none"><circle cx="6" cy="6" r="5" stroke="currentColor" stroke-width="1.5"/><line x1="6" y1="1" x2="6" y2="11" stroke="currentColor" stroke-width="1.5"/><line x1="1" y1="6" x2="11" y2="6" stroke="currentColor" stroke-width="1.5"/></svg> Pick Element`; }
+}
+
+// ═══════════════════════════════════════════════════════
+//  PASSIVE (PRD §4.2)
+// ═══════════════════════════════════════════════════════
+$('btn-passive').addEventListener('click', () => {
   st.passive = !st.passive;
-  updatePassiveBtn();
+  $('btn-passive').classList.toggle('passive-on', st.passive);
+  $('btn-passive').textContent = st.passive ? 'Passive: ON' : 'Passive';
   port.postMessage({ type: 'setPassive', enabled: st.passive });
 });
 
-btnLock.addEventListener('click', () => {
-  st.locked = !st.locked;
-  updateLockUI();
-});
-btnUnlock.addEventListener('click', () => {
-  st.locked = false;
-  updateLockUI();
-});
-btnStack.addEventListener('click', () => {
-  st.sections['sec-stack'] = !st.sections['sec-stack'];
-  applySectionState();
-  saveSections();
-  if (st.sections['sec-stack']) $('sec-stack').scrollIntoView({ block: 'nearest' });
+// ═══════════════════════════════════════════════════════
+//  LOCK (PRD §4.3)
+// ═══════════════════════════════════════════════════════
+$('btn-lock').addEventListener('click', () => { st.locked = !st.locked; applyLock(); });
+$('btn-unlock').addEventListener('click', () => { st.locked = false; applyLock(); });
+function applyLock() {
+  $('btn-lock').classList.toggle('locked', st.locked);
+  $('btn-lock').textContent = st.locked ? 'Locked' : 'Lock';
+  $('lock-banner').style.display = st.locked ? 'flex' : 'none';
+}
+
+// ═══════════════════════════════════════════════════════
+//  STACK BUTTON (PRD §9)
+// ═══════════════════════════════════════════════════════
+$('btn-stack').addEventListener('click', () => {
+  const sec = $('sec-stack');
+  sec.open = !sec.open;
+  $('btn-stack').classList.toggle('stack-on', sec.open);
+  if (sec.open) sec.scrollIntoView({ behavior: 'smooth' });
+  saveSectionState();
 });
 
-btnAddCurrent.addEventListener('click', () => {
-  if (!st.payload) return;
-  addCurrentToStack();
-});
-btnClearStack.addEventListener('click', () => {
-  st.stack = [];
-  renderStack();
-});
-btnExportPom.addEventListener('click', () => {
-  pomPicker.hidden = !pomPicker.hidden;
-  pomOutput.hidden = true;
-});
-
+// ═══════════════════════════════════════════════════════
+//  INCOMING MESSAGES
+// ═══════════════════════════════════════════════════════
 port.onMessage.addListener(msg => {
   if (msg.type === 'locatorsGenerated') {
-    if (st.locked) return;
-    st.picking = false;
-    updatePickBtn();
+    if (st.locked) return; // PRD §4.3 — discard when locked
+    if (st.picking) { st.picking = false; updatePickBtn(); }
     st.payload = msg.payload;
-    btnLock.disabled = false;
-    st.sections['sec-reference'] = true;
-    st.sections['sec-locators'] = true;
-    saveSections();
-    renderResults(msg.payload);
+    renderAll(msg.payload);
     showView('v-results');
+    $('btn-lock').disabled = false;
+    // PRD §6: open Reference + Locators on new result
+    $('sec-reference').open = true;
+    $('sec-locators').open = true;
+    saveSectionState();
   } else if (msg.type === 'pickingCancelled') {
-    st.picking = false;
-    updatePickBtn();
+    st.picking = false; updatePickBtn();
     showView(st.payload ? 'v-results' : 'v-idle');
   } else if (msg.type === 'validateResult') {
-    st.validatorState = msg;
-    renderValidation();
+    renderValidation(msg);
   } else if (msg.type === 'error') {
     $('err-msg').textContent = msg.message;
-    st.picking = false;
-    updatePickBtn();
     showView('v-error');
+    st.picking = false; updatePickBtn();
   }
 });
 
-function matchBadge(count) {
-  const cls = count === 1 ? 'match-1' : count > 1 ? 'match-many' : 'match-0';
-  const text = count === 1 ? '1' : String(count || 0);
-  return `<span class="match-badge ${cls}">${text}</span>`;
-}
-
-function renderResults(data) {
+// ═══════════════════════════════════════════════════════
+//  RENDER ALL
+// ═══════════════════════════════════════════════════════
+function renderAll(data) {
   renderReference(data);
   renderProperties(data);
-  renderLocators(data.locators || []);
-  renderStack();
-  applySectionState();
+  renderLocators(data);
+  updateStackUI();
 }
 
+// ═══════════════════════════════════════════════════════
+//  §6.1 REFERENCE
+// ═══════════════════════════════════════════════════════
 function renderReference(data) {
-  const body = $('reference-body');
-  const stableClasses = (data.classInfo?.stable || []).slice(0, 3).join(' ');
-  const relXpath = data.locators.find(loc => loc.type === 'relative-xpath')?.selector || '—';
-  const cssPath = data.locators.find(loc => loc.type === 'css-path')?.selector || '—';
-  const linkText = data.tag === 'a' ? (data.textPreview || '—') : '—';
+  const g = $('ref-grid'); g.innerHTML = '';
+  const cssPath = data.locators.find(l => l.label === 'css-path');
+  const relXp = data.locators.find(l => l.label === 'relative-xpath');
+  // Derive real match counts from locators (PRD §6.1)
+  const idLoc = data.locators.find(l => l.category === 'id' && l.label === 'id');
+  const nameLoc = data.locators.find(l => l.label === 'name');
+  const ariaLoc = data.locators.find(l => l.label === 'aria-label');
+  const linkLoc = data.locators.find(l => l.label === 'link-text');
   const rows = [
-    ['ID', data.id || '—', data.referenceCounts?.id ?? 0],
-    ['Class', stableClasses || '—', data.referenceCounts?.class ?? 0],
-    ['Tag', data.tag || '—', data.referenceCounts?.tag ?? 0],
-    ['Name', data.attributes?.name || '—', data.referenceCounts?.name ?? 0],
-    ['aria-label', data.attributes?.['aria-label'] || '—', data.referenceCounts?.ariaLabel ?? 0],
-    ['Link Text', linkText, data.referenceCounts?.linkText ?? 0],
-    ['CSS Path', cssPath, data.referenceCounts?.cssPath ?? 0],
-    ['XPath', relXpath, data.referenceCounts?.xpath ?? 0]
+    ['ID', data.id || '', idLoc ? idLoc.matchCount : 0],
+    ['Class', (data.stableClasses || []).slice(0, 3).join(' '), data.stableClasses?.length || 0],
+    ['Tag', data.tag, data.tagCount || 0],
+    ['Name', data.name || '', nameLoc ? nameLoc.matchCount : 0],
+    ['aria-label', data.ariaLabel || '', ariaLoc ? ariaLoc.matchCount : 0],
+    ['Link Text', data.linkText || '', linkLoc ? linkLoc.matchCount : 0],
+    ['CSS Path', cssPath ? cssPath.selector : '', cssPath ? cssPath.matchCount : 0],
+    ['XPath', relXp ? relXp.selector : '', relXp ? relXp.matchCount : 0]
   ];
-  body.innerHTML = `<div class="ref-grid">${rows.map(([k, v, c]) => `
-    <div class="ref-item">
-      <div class="ref-key">${escHtml(k)}</div>
-      <div class="ref-value copyable">${escHtml(v)}</div>
-      ${matchBadge(c)}
-    </div>`).join('')}</div>`;
-  body.querySelectorAll('.copyable').forEach(el => el.addEventListener('click', () => copyText(el.textContent)));
+  for (const [key, val, count] of rows) {
+    const k = document.createElement('span'); k.className = 'ref-key'; k.textContent = key;
+    const v = document.createElement('span'); v.className = 'ref-val'; v.textContent = val || '—'; v.title = val || '';
+    if (val) v.addEventListener('click', () => copyText(val, v));
+    const c = document.createElement('span');
+    c.className = 'ref-count ' + (count === 1 ? 'cnt-1' : count > 1 ? 'cnt-n' : 'cnt-0');
+    c.textContent = count;
+    g.appendChild(k); g.appendChild(v); g.appendChild(c);
+  }
 }
 
+// ═══════════════════════════════════════════════════════
+//  §6.2 PROPERTIES
+// ═══════════════════════════════════════════════════════
 function renderProperties(data) {
-  const body = $('props-body');
-  const idBadge = data.id ? `<span class="badge ${data.idStable ? 'good' : 'warn'}">id:${escHtml(data.id)}</span>` : '';
-  const roleBadge = data.attributes?.role ? `<span class="badge info">role:${escHtml(data.attributes.role)}</span>` : '';
-  const typeBadge = data.attributes?.type ? `<span class="badge info">type:${escHtml(data.attributes.type)}</span>` : '';
-  const ariaBadge = data.attributes?.['aria-label'] ? `<span class="badge info">aria-label</span>` : '';
-  const testBadge = Object.keys(data.attributes || {}).find(key => key.startsWith('data-test') || key === 'data-cy' || key === 'data-qa' || key === 'data-e2e' || key === 'data-automation-id') ? `<span class="badge good">test-id</span>` : '';
-  const attrs = Object.entries(data.attributes || {}).map(([key, value]) => `
-    <div class="attr-item">
-      <div class="attr-key ${PRIORITY_ATTRS.has(key) ? 'priority' : ''}">${escHtml(key)}</div>
-      <div class="attr-value copyable">${escHtml(value)}</div>
-      <button class="sm-btn btn-mini">Copy</button>
-    </div>`).join('');
-
-  body.innerHTML = `
-    <div class="identity-row">
-      <span class="identity-tag">&lt;${escHtml(data.tag)}&gt;</span>
-      ${idBadge}${roleBadge}${typeBadge}${ariaBadge}${testBadge}
-    </div>
-    <div class="kv-grid">
-      <div class="kv-block">
-        <div class="kv-title">All attributes</div>
-        <div class="attr-grid">${attrs || '<div class="empty-note">No attributes.</div>'}</div>
-      </div>
-      <div class="kv-block">
-        <div class="kv-title">Classes</div>
-        <div class="chips">${renderClassChips(data.classInfo)}</div>
-      </div>
-      <div class="kv-block">
-        <div class="kv-title">Computed styles</div>
-        <div class="attr-grid">${renderSimpleGrid(data.computedStyles || {})}</div>
-      </div>
-      <div class="kv-block">
-        <div class="kv-title">Bounds</div>
-        <div class="attr-grid">${renderSimpleGrid({
-          size: `${data.rect?.w ?? 0} × ${data.rect?.h ?? 0}`,
-          position: `${data.rect?.x ?? 0}, ${data.rect?.y ?? 0}`,
-          tagCount: data.referenceCounts?.tag ?? 0,
-          childCount: data.childCount ?? 0
-        })}</div>
-      </div>
-      <div class="kv-block">
-        <div class="kv-title">Text content</div>
-        <div class="text-snippet">${escHtml(data.fullTextPreview || '—')}</div>
-      </div>
-    </div>`;
-
-  body.querySelectorAll('.attr-value.copyable').forEach(el => el.addEventListener('click', () => copyText(el.textContent)));
-  body.querySelectorAll('.btn-mini').forEach(el => el.addEventListener('click', () => copyText(el.previousElementSibling.textContent, el)));
-  body.querySelectorAll('.chip[data-copy]').forEach(el => el.addEventListener('click', () => copyText(el.dataset.copy)));
-}
-
-function renderClassChips(classInfo = { stable: [], dynamic: [] }) {
-  const stable = (classInfo.stable || []).map(cls => `<span class="chip" data-copy=".${escHtml(cls)}">.${escHtml(cls)}</span>`).join('');
-  const dynamic = (classInfo.dynamic || []).map(cls => `<span class="chip dynamic">${escHtml(cls)}</span>`).join('');
-  return stable + dynamic || '<span class="empty-note">No classes.</span>';
-}
-
-function renderSimpleGrid(obj) {
-  return Object.entries(obj).map(([k, v]) => `
-    <div class="attr-item">
-      <div class="attr-key">${escHtml(k)}</div>
-      <div class="attr-value">${escHtml(v)}</div>
-      <span></span>
-    </div>`).join('');
-}
-
-function getGrade(score) {
-  if (score >= 85) return 'a';
-  if (score >= 70) return 'b';
-  if (score >= 50) return 'c';
-  if (score >= 30) return 'd';
-  return 'f';
-}
-
-function categoryColor(category) {
-  return {
-    test: '#10b981', aria: '#a855f7', id: '#8b5cf6', attr: '#22d3ee', class: '#3b82f6', text: '#f97316', hierarchy: '#84cc16', logical: '#f59e0b', css: '#eab308', xpath: '#9ca3af', position: '#ef4444', absolute: '#334155'
-  }[category] || '#9ca3af';
-}
-
-function renderLocators(locators) {
-  const body = $('locators-body');
-  const stable = locators.filter(loc => loc.score >= 65).length;
-  const moderate = locators.filter(loc => loc.score >= 30 && loc.score < 65).length;
-  const fragile = locators.filter(loc => loc.score < 30).length;
-  $('tier-pills').innerHTML = `<span class="pill stable">Stable ${stable}</span><span class="pill moderate">Moderate ${moderate}</span><span class="pill fragile">Fragile ${fragile}</span>`;
-
-  const best = locators.find(loc => loc.matchCount === 1) || locators[0];
-  const groups = [
-    ['Stable', locators.filter(loc => loc.score >= 65)],
-    ['Moderate', locators.filter(loc => loc.score >= 30 && loc.score < 65)],
-    ['Fragile', locators.filter(loc => loc.score < 30)]
-  ].filter(([, items]) => items.length);
-
-  body.innerHTML = groups.map(([label, items]) => `
-    <div class="loc-divider">${label}</div>
-    ${items.map(loc => locatorCard(loc, best && loc.id === best.id)).join('')}
-  `).join('');
-
-  body.querySelectorAll('.loc-card').forEach(card => wireLocatorCard(card));
-}
-
-function locatorCard(loc, isBest) {
-  const grade = getGrade(loc.score);
-  const reason = [loc.reason, loc.warning, loc.matchCount === 0 ? 'No elements currently match this selector.' : '', loc.matchCount > 1 ? `Matches ${loc.matchCount} elements, so uniqueness is reduced.` : ''].filter(Boolean).join(' ');
-  return `
-    <article class="loc-card ${isBest ? 'best expanded' : ''} ${loc.matchCount === 0 ? 'zero' : ''}" data-locator-id="${loc.id}">
-      <div class="loc-header">
-        <div class="score-wrap">
-          <div class="score-text grade-${grade}">${loc.score}%</div>
-          <div class="score-bar"><span class="fill-${grade}" style="width:${Math.max(0, Math.min(loc.score, 100))}%"></span></div>
-        </div>
-        <span class="cat-dot" style="background:${categoryColor(loc.category)}"></span>
-        <div class="loc-title">
-          <div class="loc-main">
-            <span>${escHtml(loc.category)} ${escHtml(loc.type)}</span>
-            ${isBest ? '<span class="pill best-pill">★ Best</span>' : ''}
-            <span class="match-badge ${loc.matchCount === 1 ? 'match-1' : loc.matchCount > 1 ? 'match-many' : 'match-0'}">${loc.matchCount === 1 ? '1 match' : `${loc.matchCount} matches`}</span>
-          </div>
-          <div class="loc-sub">${escHtml(loc.label)} • ${escHtml(loc.selectorType.toUpperCase())}</div>
-        </div>
-        ${loc.matchCount > 1 ? `<div class="loc-nav"><button class="icon-btn" data-nav="prev">‹</button><button class="icon-btn" data-nav="next">›</button></div>` : ''}
-      </div>
-      <div class="loc-body">
-        <pre class="loc-code">${escHtml(loc.selector)}</pre>
-        <div class="loc-actions">
-          <button class="sm-btn" data-action="flash">⚡ Flash</button>
-          <button class="sm-btn" data-action="highlight">🔍 Highlight</button>
-          <button class="sm-btn" data-action="copy">Copy Raw</button>
-          <button class="sm-btn" data-action="frameworks">Copy for…</button>
-          <details class="reason-tip">
-            <summary class="sm-btn">i</summary>
-            <div class="reason-pop">${escHtml(reason || 'No additional notes.')}</div>
-          </details>
-        </div>
-        <div class="framework-grid">${POM_FORMATS.map(name => `<button class="sm-btn" data-framework="${escHtml(name)}">${escHtml(name)}</button>`).join('')}</div>
-      </div>
-    </article>`;
-}
-
-function wireLocatorCard(card) {
-  const id = Number(card.dataset.locatorId);
-  const loc = st.payload?.locators?.find(item => item.id === id);
-  if (!loc) return;
-  card.querySelector('.loc-header').addEventListener('click', event => {
-    if (event.target.closest('button')) return;
-    card.classList.toggle('expanded');
-  });
-  card.querySelector('[data-action="copy"]').addEventListener('click', e => copyText(loc.selector, e.currentTarget));
-  card.querySelector('[data-action="frameworks"]').addEventListener('click', () => {
-    card.querySelector('.framework-grid').classList.toggle('open');
-  });
-  card.querySelectorAll('[data-framework]').forEach(btn => btn.addEventListener('click', () => copyText(selectorToFramework(loc, btn.dataset.framework), btn)));
-  ['flash', 'highlight'].forEach(mode => {
-    card.querySelector(`[data-action="${mode}"]`).addEventListener('click', e => toggleLocatorEffect(loc, mode, e.currentTarget));
-  });
-  card.querySelectorAll('[data-nav]').forEach(btn => btn.addEventListener('click', e => {
-    e.stopPropagation();
-    port.postMessage({ type: 'cycleMatch', selector: loc.selector, selectorType: loc.selectorType, direction: btn.dataset.nav });
-  }));
-}
-
-function toggleLocatorEffect(loc, mode, btn) {
-  const isSame = st.activeLocatorId === loc.id && st.activeLocatorMode === mode;
-  port.postMessage({ type: isSame ? 'clearFlash' : 'flashLocator', selector: loc.selector, selectorType: loc.selectorType, mode });
-  st.activeLocatorId = isSame ? null : loc.id;
-  st.activeLocatorMode = isSame ? null : mode;
-  $$('[data-action="flash"], [data-action="highlight"]').forEach(el => el.classList.remove('is-active'));
-  if (!isSame) btn.classList.add('is-active');
-}
-
-function addCurrentToStack() {
-  const loc = st.payload?.locators?.find(item => item.matchCount === 1) || st.payload?.locators?.[0];
-  if (!loc) return;
-  const fingerprint = `${st.payload.tag}|${st.payload.id || ''}|${st.payload.textPreview || ''}|${loc.selector}`;
-  if (st.stack.some(item => item.fingerprint === fingerprint)) return;
-  st.stack.push({
-    fingerprint,
-    tag: st.payload.tag,
-    text: st.payload.textPreview || '',
-    selector: loc.selector,
-    selectorType: loc.selectorType,
-    fieldName: toFieldName(st.payload.textPreview || st.payload.id || st.payload.attributes?.['aria-label'] || st.payload.attributes?.role || st.payload.tag)
-  });
-  renderStack();
-}
-
-function renderStack() {
-  updateStackButton();
-  const list = $('stack-list');
-  if (!st.stack.length) {
-    list.className = 'stack-list empty-note';
-    list.textContent = 'No stacked elements yet.';
-    pomPicker.hidden = true;
-    pomOutput.hidden = true;
-    return;
+  const body = $('props-body'); body.innerHTML = '';
+  // Identity badges
+  const idRow = document.createElement('div'); idRow.className = 'prop-identity';
+  idRow.innerHTML = `<span class="prop-badge prop-badge-tag">&lt;${esc(data.tag)}&gt;</span>`;
+  if (data.id) {
+    const stable = data.locators.some(l => l.category === 'id' && l.label === 'id');
+    idRow.innerHTML += `<span class="prop-badge ${stable ? 'prop-badge-green' : 'prop-badge-amber'}">id: ${esc(data.id.slice(0,25))}</span>`;
   }
-  list.className = 'stack-list';
-  list.innerHTML = st.stack.map((item, index) => `
-    <div class="stack-row" data-stack-index="${index}">
-      <div>${index + 1}.</div>
-      <div class="stack-meta">
-        <div><strong>&lt;${escHtml(item.tag)}&gt;</strong></div>
-        <div class="stack-selector">${escHtml(item.selector)}</div>
-        <div class="stack-snippet">${escHtml(item.text || '—')}</div>
-      </div>
-      <div class="stack-actions">
-        <button class="icon-btn" data-stack-action="locate">⊙</button>
-        <button class="icon-btn" data-stack-action="remove">×</button>
-      </div>
-    </div>`).join('');
-  list.querySelectorAll('[data-stack-action]').forEach(btn => btn.addEventListener('click', e => {
-    const row = e.currentTarget.closest('[data-stack-index]');
-    const index = Number(row.dataset.stackIndex);
-    if (e.currentTarget.dataset.stackAction === 'locate') {
-      const item = st.stack[index];
-      port.postMessage({ type: 'flashLocator', selector: item.selector, selectorType: item.selectorType, mode: 'highlight' });
-    } else {
-      st.stack.splice(index, 1);
-      renderStack();
+  if (data.role) idRow.innerHTML += `<span class="prop-badge prop-badge-violet">role: ${esc(data.role)}</span>`;
+  if (data.attributes.type) idRow.innerHTML += `<span class="prop-badge prop-badge-cyan">type: ${esc(data.attributes.type)}</span>`;
+  const testAttrs = ['data-testid', 'data-test-id', 'data-cy', 'data-test', 'data-qa'];
+  for (const ta of testAttrs) { if (data.attributes[ta]) idRow.innerHTML += `<span class="prop-badge prop-badge-green">${ta}</span>`; }
+  body.appendChild(idRow);
+
+  // All attributes
+  const priorityAttrs = new Set(['id', 'name', 'aria-label', 'data-testid', 'placeholder', 'href', 'value', 'role', 'type']);
+  const skipAttrs = new Set(['class', 'style']);
+  for (const [k, v] of Object.entries(data.attributes)) {
+    if (skipAttrs.has(k) || v.length > 200) continue;
+    const row = document.createElement('div'); row.className = 'prop-row';
+    const isPri = priorityAttrs.has(k);
+    row.innerHTML = `<span class="prop-key">${esc(k)}</span><span class="prop-val ${isPri ? 'prop-val-pri' : ''}" title="Click to copy">${esc(v)}</span>`;
+    row.querySelector('.prop-val').addEventListener('click', function() { copyText(v, this); });
+    body.appendChild(row);
+  }
+
+  // Class chips
+  if (data.classes.length > 0) {
+    const chips = document.createElement('div'); chips.className = 'class-chips';
+    for (const cls of data.stableClasses || []) {
+      const c = document.createElement('span'); c.className = 'chip chip-stable'; c.textContent = '.' + cls;
+      c.addEventListener('click', () => copyText('.' + cls, c)); chips.appendChild(c);
     }
-  }));
-  renderPomPicker();
-}
+    for (const cls of data.dynamicClasses || []) {
+      const c = document.createElement('span'); c.className = 'chip chip-dynamic'; c.textContent = '.' + cls;
+      chips.appendChild(c);
+    }
+    body.appendChild(chips);
+  }
 
-function renderPomPicker() {
-  pomPicker.innerHTML = POM_FORMATS.map(name => `<button class="sm-btn" data-pom-format="${escHtml(name)}">${escHtml(name)}</button>`).join('');
-  pomPicker.querySelectorAll('[data-pom-format]').forEach(btn => btn.addEventListener('click', () => {
-    pomOutput.hidden = false;
-    pomOutput.textContent = exportPom(btn.dataset.pomFormat);
-  }));
-}
-
-function toFieldName(input) {
-  return String(input || 'element')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/[^a-zA-Z0-9]+/g, ' ')
-    .trim()
-    .split(/\s+/)
-    .slice(0, 4)
-    .map((part, index) => index ? part.charAt(0).toUpperCase() + part.slice(1).toLowerCase() : part.toLowerCase())
-    .join('') || 'element';
-}
-
-function exportPom(format) {
-  const items = st.stack;
-  switch (format) {
-    case 'Playwright TS':
-      return `export class LocatorLensPage {\n  constructor(private readonly page: Page) {}\n${items.map(item => `  readonly ${item.fieldName}: Locator = this.page.locator('${item.selector.replace(/'/g, "\\'")}');`).join('\n')}\n}`;
-    case 'Selenium Java':
-      return `public class LocatorLensPage {\n${items.map(item => `  @FindBy(${item.selectorType === 'xpath' ? `xpath = "${item.selector.replace(/"/g, '\\"')}"` : `css = "${item.selector.replace(/"/g, '\\"')}"`})\n  WebElement ${item.fieldName};`).join('\n\n')}\n}`;
-    case 'Cypress JS':
-      return `export const selectors = ${JSON.stringify(Object.fromEntries(items.map(item => [item.fieldName, item.selector])), null, 2)};`;
-    case 'WebdriverIO':
-      return `class LocatorLensPage {\n${items.map(item => `  get ${item.fieldName}() { return $('${item.selector.replace(/'/g, "\\'")}'); }`).join('\n')}\n}`;
-    case 'Puppeteer':
-      return `export class LocatorLensPage {\n  constructor(page) { this.page = page; }\n${items.map(item => `  async ${item.fieldName}() { return ${item.selectorType === 'xpath' ? `this.page.$x('${item.selector.replace(/'/g, "\\'")}')` : `this.page.$('${item.selector.replace(/'/g, "\\'")}')`}; }`).join('\n')}\n}`;
-    case 'TestCafe':
-      return `class LocatorLensPage {\n${items.map(item => `  get ${item.fieldName}() { return Selector('${item.selector.replace(/'/g, "\\'")}'); }`).join('\n')}\n}`;
-    case 'Raw JSON':
-      return JSON.stringify(Object.fromEntries(items.map(item => [item.fieldName, item.selector])), null, 2);
-    default:
-      return items.map(item => item.selector).join('\n');
+  // Computed styles + bounds
+  if (data.computed || data.rect) {
+    const sub = document.createElement('div'); sub.className = 'prop-sub';
+    let html = '';
+    if (data.computed) {
+      html += `<div class="prop-row"><span class="prop-key">display</span><span class="prop-val">${esc(data.computed.display)}</span></div>`;
+      html += `<div class="prop-row"><span class="prop-key">visibility</span><span class="prop-val">${esc(data.computed.visibility)}</span></div>`;
+      html += `<div class="prop-row"><span class="prop-key">cursor</span><span class="prop-val">${esc(data.computed.cursor)}</span></div>`;
+      html += `<div class="prop-row"><span class="prop-key">font</span><span class="prop-val">${esc(data.computed.fontSize)} / ${esc(data.computed.fontWeight)}</span></div>`;
+    }
+    if (data.rect) html += `<div class="prop-row"><span class="prop-key">bounds</span><span class="prop-val">${data.rect.w}×${data.rect.h} at (${data.rect.x}, ${data.rect.y})</span></div>`;
+    html += `<div class="prop-row"><span class="prop-key">children</span><span class="prop-val">${data.childCount}</span></div>`;
+    if (data.textPreview) html += `<div class="prop-row"><span class="prop-key">text</span><span class="prop-val">${esc(data.textPreview.slice(0,200))}</span></div>`;
+    sub.innerHTML = html;
+    body.appendChild(sub);
   }
 }
 
-function selectedRadio(name) {
-  return document.querySelector(`input[name="${name}"]:checked`)?.value;
+// ═══════════════════════════════════════════════════════
+//  §6.3 LOCATORS
+// ═══════════════════════════════════════════════════════
+function renderLocators(data) {
+  const locs = data.locators;
+  // Tier pills in header
+  const tiers = { stable: 0, moderate: 0, fragile: 0 };
+  locs.forEach(l => tiers[l.tier]++);
+  $('tier-pills').innerHTML =
+    `<span class="tier-pill tp-stable">${tiers.stable}</span>` +
+    `<span class="tier-pill tp-moderate">${tiers.moderate}</span>` +
+    `<span class="tier-pill tp-fragile">${tiers.fragile}</span>`;
+
+  // Best card — highest scoring with matchCount === 1
+  const best = locs.find(l => l.matchCount === 1);
+  const bestEl = $('best-card');
+  if (best) {
+    const locMeta = buildLocMeta(data, best);
+    bestEl.style.display = '';
+    bestEl.innerHTML = `
+      <div class="best-header">
+        <span class="best-star">★</span>
+        <span class="best-label">${esc(best.label)} · ${best.score}% · unique</span>
+      </div>
+      <div class="best-sel">${esc(best.selector)}</div>
+      <div class="best-actions">
+        <button class="sm-btn" data-act="copy-raw">Copy Raw</button>
+        <button class="sm-btn" data-act="flash">⚡ Flash</button>
+        <button class="sm-btn" data-act="highlight">🔍 Highlight</button>
+      </div>
+      <div class="fw-grid"></div>`;
+    bestEl.querySelector('[data-act="copy-raw"]').onclick = function() { copyText(best.selector, this); };
+    bestEl.querySelector('[data-act="flash"]').onclick = function() { toggleFlash('flash', best, this); };
+    bestEl.querySelector('[data-act="highlight"]').onclick = function() { toggleFlash('highlight', best, this); };
+    buildFwGrid(bestEl.querySelector('.fw-grid'), best, locMeta);
+  } else { bestEl.style.display = 'none'; }
+
+  // Tier sections
+  for (const tier of ['stable', 'moderate', 'fragile']) {
+    const container = $('tier-' + tier);
+    const hd = $('tier-' + tier + '-hd');
+    container.innerHTML = '';
+    const tierLocs = locs.filter(l => l.tier === tier);
+    if (tierLocs.length === 0) { hd.style.display = 'none'; continue; }
+    hd.style.display = ''; hd.textContent = `${tier.charAt(0).toUpperCase() + tier.slice(1)} (${tierLocs.length})`;
+    for (const loc of tierLocs) {
+      container.appendChild(buildLocCard(data, loc, loc === best));
+    }
+  }
 }
 
-function requestValidation() {
-  const selector = valInput.value.trim();
-  const selectorType = selectedRadio('val-type') || 'css';
-  st.validatorMode = selectedRadio('val-mode') || 'flash';
-  if (!selector) {
-    st.validatorState = { selector: '', selectorType, count: 0, error: null, preview: [] };
-    renderValidation();
-    return;
-  }
-  port.postMessage({ type: 'validateSelector', selector, selectorType });
+function buildLocMeta(data, loc) {
+  return {
+    _attrs: data.attributes,
+    _tag: data.tag,
+    _text: data.textContent,
+    _role: data.role,
+    _stableId: data.id && data.locators.some(l => l.category === 'id' && l.label === 'id')
+  };
 }
 
-valInput.addEventListener('input', () => {
-  clearTimeout(st.validateTimer);
-  st.validateTimer = setTimeout(requestValidation, 380);
-});
-document.querySelectorAll('input[name="val-type"], input[name="val-mode"]').forEach(input => input.addEventListener('change', requestValidation));
-valFlashBtn.addEventListener('click', () => {
-  const { selector, selectorType } = st.validatorState;
-  if (!selector) return;
-  const shouldStop = st.validatorActive;
-  port.postMessage({ type: shouldStop ? 'clearFlash' : 'flashLocator', selector, selectorType, mode: selectedRadio('val-mode') || 'flash' });
-  st.validatorActive = !shouldStop;
-  valFlashBtn.textContent = st.validatorActive ? 'Stop' : 'Flash';
-});
+function scoreGrade(s) {
+  if (s >= 80) return 's-a';
+  if (s >= 65) return 's-b';
+  if (s >= 45) return 's-c';
+  if (s >= 30) return 's-d';
+  return 's-f';
+}
 
-function renderValidation() {
-  const { selector, count, error, preview } = st.validatorState;
-  const result = $('val-result');
-  const previewEl = $('val-preview');
-  if (!selector) {
-    result.className = 'val-result';
-    result.textContent = '';
-    previewEl.className = 'val-preview empty-note';
-    previewEl.textContent = 'No preview yet.';
-    valFlashBtn.textContent = 'Flash';
-    st.validatorActive = false;
-    return;
+function catDot(cat) {
+  const map = { test:'dot-test', aria:'dot-aria', id:'dot-id', attr:'dot-attr', class:'dot-class', text:'dot-text', hierarchy:'dot-hierarchy', logical:'dot-logical', css:'dot-css', xpath:'dot-xpath', position:'dot-position', absolute:'dot-absolute' };
+  return map[cat] || 'dot-xpath';
+}
+
+function buildLocCard(data, loc, isBest) {
+  const card = document.createElement('div');
+  card.className = 'loc-card';
+  if (loc.matchCount === 0) card.dataset.zero = 'true';
+
+  const locMeta = buildLocMeta(data, loc);
+
+  // Header (always visible)
+  const head = document.createElement('div'); head.className = 'loc-head';
+  let headHtml = `<span class="loc-dot ${catDot(loc.category)}"></span>`;
+  headHtml += `<span class="loc-info">${esc(loc.category)} ${esc(loc.label)}</span>`;
+  if (isBest) headHtml += `<span class="loc-best-pill">★ Best</span>`;
+  headHtml += `<span class="loc-score ${scoreGrade(loc.score)}">${loc.score}</span>`;
+  const mCls = loc.matchCount === 1 ? 'm-unique' : loc.matchCount > 1 ? 'm-multi' : 'm-zero';
+  headHtml += `<span class="loc-match ${mCls}">${loc.matchCount === 1 ? '1 match' : loc.matchCount + ' matches'}</span>`;
+  if (loc.matchCount > 1) {
+    headHtml += `<span class="loc-nav"><button class="loc-nav-btn" data-dir="prev" title="Previous match">‹</button><button class="loc-nav-btn" data-dir="next" title="Next match">›</button></span>`;
   }
-  if (error) {
-    result.className = 'val-result fail';
-    result.textContent = `✗ Invalid: ${error}`;
-  } else if (count === 0) {
-    result.className = 'val-result fail';
-    result.textContent = '✗ 0 elements matched';
-  } else if (count === 1) {
-    result.className = 'val-result ok';
-    result.textContent = '✓ 1 match — unique';
+  head.innerHTML = headHtml;
+
+  // Nav buttons
+  let navIdx = 0;
+  head.querySelectorAll('.loc-nav-btn').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      navIdx += btn.dataset.dir === 'next' ? 1 : -1;
+      navIdx = Math.max(0, Math.min(navIdx, loc.matchCount - 1));
+      port.postMessage({ type: 'navigateMatch', selector: loc.selector, selectorType: loc.selectorType, index: navIdx });
+    });
+  });
+
+  // Toggle expand
+  head.addEventListener('click', () => card.classList.toggle('open'));
+
+  // Body (hidden until expanded)
+  const body = document.createElement('div'); body.className = 'loc-cbody';
+  let bodyHtml = `<div class="loc-sel">${esc(loc.selector)}</div>`;
+  if (loc.warning) bodyHtml += `<div class="loc-warning">⚠ ${esc(loc.warning)}</div>`;
+  bodyHtml += `<div class="loc-actions">
+    <button class="sm-btn" data-act="copy-raw">Copy Raw</button>
+    <button class="sm-btn" data-act="flash">⚡ Flash</button>
+    <button class="sm-btn" data-act="highlight">🔍 Highlight</button>
+    <button class="sm-btn" data-act="copy-for">Copy for…</button>
+  </div>`;
+  bodyHtml += `<div class="fw-grid" style="display:none"></div>`;
+  body.innerHTML = bodyHtml;
+
+  body.querySelector('[data-act="copy-raw"]').addEventListener('click', function() { copyText(loc.selector, this); });
+  body.querySelector('[data-act="flash"]').addEventListener('click', function() { toggleFlash('flash', loc, this); });
+  body.querySelector('[data-act="highlight"]').addEventListener('click', function() { toggleFlash('highlight', loc, this); });
+  body.querySelector('[data-act="copy-for"]').addEventListener('click', () => {
+    const g = body.querySelector('.fw-grid');
+    g.style.display = g.style.display === 'none' ? 'flex' : 'none';
+  });
+  buildFwGrid(body.querySelector('.fw-grid'), loc, locMeta);
+
+  card.appendChild(head);
+  card.appendChild(body);
+  return card;
+}
+
+function buildFwGrid(container, loc, meta) {
+  for (const fw of FW_LIST) {
+    const btn = document.createElement('button');
+    btn.className = 'sm-btn';
+    btn.textContent = fw.label;
+    btn.addEventListener('click', function() {
+      const formatted = fmtForFramework(fw.key, loc.selector, loc.selectorType, meta);
+      copyText(formatted, this);
+    });
+    container.appendChild(btn);
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+//  FLASH / HIGHLIGHT TOGGLE
+// ═══════════════════════════════════════════════════════
+function toggleFlash(mode, loc, btn) {
+  const key = mode + ':' + loc.selector;
+  if (st.activeFlash === key) {
+    port.postMessage({ type: 'clearFlash' });
+    st.activeFlash = null;
+    btn.classList.remove('active');
   } else {
-    result.className = 'val-result warn';
-    result.textContent = `⚠ ${count} matches — not unique`;
+    // Clear previous
+    document.querySelectorAll('.sm-btn.active').forEach(b => b.classList.remove('active'));
+    port.postMessage({ type: mode === 'flash' ? 'flashLocator' : 'highlightLocator', selector: loc.selector, selectorType: loc.selectorType });
+    st.activeFlash = key;
+    btn.classList.add('active');
   }
-  previewEl.className = 'val-preview';
-  previewEl.innerHTML = (preview || []).length ? preview.map(item => `<div class="preview-item">&lt;${escHtml(item.tag)}&gt; "${escHtml(item.text)}"</div>`).join('') : '<div class="empty-note">No preview available.</div>';
 }
 
-$$('.sec').forEach(sec => sec.addEventListener('toggle', () => {
-  st.sections[sec.id] = sec.open;
-  saveSections();
-  updateStackButton();
-}));
-
-document.addEventListener('click', e => {
-  if (!e.target.closest('.reason-tip')) document.querySelectorAll('.reason-tip[open]').forEach(el => { el.open = false; });
+// ═══════════════════════════════════════════════════════
+//  §6.4 STACK + POM EXPORT
+// ═══════════════════════════════════════════════════════
+$('btn-add-stack').addEventListener('click', () => {
+  if (!st.payload) return;
+  const best = st.payload.locators.find(l => l.matchCount === 1) || st.payload.locators[0];
+  if (!best) return;
+  // Deduplicate by selector
+  if (st.stack.some(s => s.selector === best.selector)) return;
+  st.stack.push({
+    tag: st.payload.tag,
+    text: st.payload.textContent || '',
+    selector: best.selector,
+    selectorType: best.selectorType,
+    id: st.payload.id,
+    ariaLabel: st.payload.ariaLabel,
+    role: st.payload.role,
+    attrs: st.payload.attributes
+  });
+  updateStackUI();
 });
 
-function init() {
-  updatePickBtn();
-  updatePassiveBtn();
-  updateLockUI();
-  applySectionState();
-  renderStack();
-  renderValidation();
-  renderPomPicker();
+$('btn-clear-stack').addEventListener('click', () => { st.stack = []; updateStackUI(); $('pom-picker').style.display = 'none'; });
+$('btn-export-pom').addEventListener('click', () => {
+  const p = $('pom-picker');
+  p.style.display = p.style.display === 'none' ? 'flex' : 'none';
+});
+
+function updateStackUI() {
+  $('stack-count').textContent = st.stack.length;
+  const list = $('stack-list'); list.innerHTML = '';
+  st.stack.forEach((item, i) => {
+    const row = document.createElement('div'); row.className = 'stack-row';
+    row.innerHTML = `<span class="stack-idx">${i + 1}</span><span class="stack-info">&lt;${esc(item.tag)}&gt; ${esc(item.selector.slice(0,60))}</span>`;
+    const locBtn = document.createElement('button'); locBtn.className = 'sm-btn'; locBtn.textContent = '⊙';
+    locBtn.addEventListener('click', () => { port.postMessage({ type: 'highlightLocator', selector: item.selector, selectorType: item.selectorType }); });
+    const rmBtn = document.createElement('button'); rmBtn.className = 'sm-btn'; rmBtn.textContent = '×';
+    rmBtn.addEventListener('click', () => { st.stack.splice(i, 1); updateStackUI(); });
+    row.appendChild(locBtn); row.appendChild(rmBtn);
+    list.appendChild(row);
+  });
 }
 
-init();
+// POM export buttons
+document.querySelectorAll('.pom-btn').forEach(btn => {
+  btn.addEventListener('click', function() {
+    if (!st.stack.length) return;
+    const fw = this.dataset.fw;
+    const pom = generatePOM(st.stack, fw);
+    copyText(pom, this);
+  });
+});
+
+function fieldName(item) {
+  // Auto-generate camelCase field name from text → id → aria-label → role → tag
+  let raw = item.text || item.id || item.ariaLabel || item.role || item.tag;
+  raw = raw.replace(/[^a-zA-Z0-9\s]/g, '').trim().slice(0, 40);
+  if (!raw) raw = item.tag;
+  const words = raw.split(/\s+/).filter(Boolean);
+  return words.map((w, i) => i === 0 ? w.toLowerCase() : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join('');
+}
+
+function generatePOM(stack, fw) {
+  const items = stack.map(s => ({ name: fieldName(s), sel: s.selector, tp: s.selectorType, item: s }));
+
+  switch (fw) {
+    case 'playwright': {
+      let out = `import { type Locator, type Page } from '@playwright/test';\n\nexport class PageModel {\n  readonly page: Page;\n`;
+      items.forEach(i => out += `  readonly ${i.name}: Locator;\n`);
+      out += `\n  constructor(page: Page) {\n    this.page = page;\n`;
+      items.forEach(i => {
+        const meta = { _attrs: i.item.attrs, _tag: i.item.tag, _text: i.item.text, _role: i.item.role, _stableId: true };
+        out += `    this.${i.name} = ${fmtForFramework('playwright', i.sel, i.tp, meta)};\n`;
+      });
+      out += `  }\n}\n`;
+      return out;
+    }
+    case 'selenium': {
+      let out = `import org.openqa.selenium.WebElement;\nimport org.openqa.selenium.support.FindBy;\nimport org.openqa.selenium.support.PageFactory;\n\npublic class PageModel {\n`;
+      items.forEach(i => {
+        const ann = i.tp === 'xpath' ? `@FindBy(xpath = "${i.sel}")` : `@FindBy(css = "${i.sel}")`;
+        out += `  ${ann}\n  private WebElement ${i.name};\n\n`;
+      });
+      out += `  public PageModel(WebDriver driver) {\n    PageFactory.initElements(driver, this);\n  }\n}\n`;
+      return out;
+    }
+    case 'cypress': {
+      let out = `const selectors = {\n`;
+      items.forEach((i, idx) => out += `  ${i.name}: '${i.sel}'${idx < items.length - 1 ? ',' : ''}\n`);
+      out += `};\nexport default selectors;\n`;
+      return out;
+    }
+    case 'wdio': {
+      let out = `class PageModel {\n`;
+      items.forEach(i => out += `  get ${i.name}() { return $('${i.sel}'); }\n`);
+      out += `}\nexport default new PageModel();\n`;
+      return out;
+    }
+    case 'puppeteer': {
+      let out = `class PageModel {\n  constructor(page) { this.page = page; }\n\n`;
+      items.forEach(i => {
+        out += i.tp === 'xpath'
+          ? `  async ${i.name}() { return (await this.page.$x('${i.sel}'))[0]; }\n`
+          : `  async ${i.name}() { return this.page.$('${i.sel}'); }\n`;
+      });
+      out += `}\nmodule.exports = PageModel;\n`;
+      return out;
+    }
+    case 'testcafe': {
+      let out = `import { Selector } from 'testcafe';\n\n`;
+      items.forEach(i => out += `export const ${i.name} = Selector('${i.sel}');\n`);
+      return out;
+    }
+    case 'raw': default: {
+      const obj = {};
+      items.forEach(i => obj[i.name] = i.sel);
+      return JSON.stringify(obj, null, 2);
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+//  §6.5 LIVE VALIDATOR
+// ═══════════════════════════════════════════════════════
+let valDebounce = null;
+$('val-input').addEventListener('input', () => {
+  clearTimeout(valDebounce);
+  valDebounce = setTimeout(() => {
+    const sel = $('val-input').value.trim();
+    if (!sel) { $('val-result').innerHTML = ''; $('val-preview').innerHTML = ''; $('val-flash').style.display = 'none'; return; }
+    port.postMessage({ type: 'validateSelector', selector: sel, selectorType: $('val-type').value });
+  }, 380);
+});
+$('val-go').addEventListener('click', () => {
+  const sel = $('val-input').value.trim();
+  if (!sel) return;
+  port.postMessage({ type: 'validateSelector', selector: sel, selectorType: $('val-type').value });
+});
+$('val-input').addEventListener('keydown', e => { if (e.key === 'Enter') $('val-go').click(); });
+
+$('val-flash').addEventListener('click', function() {
+  const sel = $('val-input').value.trim();
+  if (!sel) return;
+  const mode = $('val-mode').value;
+  port.postMessage({ type: mode === 'flash' ? 'flashLocator' : 'highlightLocator', selector: sel, selectorType: $('val-type').value });
+  this.textContent = 'Stop';
+  this._active = !this._active;
+  if (!this._active) { port.postMessage({ type: 'clearFlash' }); this.textContent = mode === 'flash' ? '⚡ Flash' : '🔍 Highlight'; }
+});
+
+function renderValidation(msg) {
+  const el = $('val-result');
+  const prev = $('val-preview');
+  const flashBtn = $('val-flash');
+  if (msg.error) {
+    el.className = 'val-result val-fail'; el.textContent = `✗ Invalid: ${msg.error}`;
+    prev.innerHTML = ''; flashBtn.style.display = 'none';
+  } else if (msg.count === 0) {
+    el.className = 'val-result val-fail'; el.textContent = `✗ 0 elements matched`;
+    prev.innerHTML = ''; flashBtn.style.display = 'none';
+  } else {
+    const cls = msg.count === 1 ? 'val-ok' : 'val-warn';
+    const txt = msg.count === 1 ? '✓ 1 match — unique' : `⚠ ${msg.count} matches — not unique`;
+    el.className = 'val-result ' + cls; el.textContent = txt;
+    // Preview list (up to 5)
+    prev.innerHTML = '';
+    if (msg.previews) {
+      msg.previews.forEach(p => {
+        const d = document.createElement('div'); d.className = 'val-preview-item';
+        d.textContent = `<${p.tag}> "${p.text.slice(0, 50)}"`;
+        prev.appendChild(d);
+      });
+    }
+    flashBtn.style.display = '';
+    const mode = $('val-mode').value;
+    flashBtn.textContent = mode === 'flash' ? '⚡ Flash' : '🔍 Highlight';
+    flashBtn._active = false;
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+//  GLOBAL CLICK — close menus
+// ═══════════════════════════════════════════════════════
+document.addEventListener('click', e => {
+  if (!e.target.closest('.fw-grid') && !e.target.closest('.pom-picker')) {
+    // nothing to close currently
+  }
+});

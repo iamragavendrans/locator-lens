@@ -1,15 +1,13 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8"/>
-  <title>LocatorLens</title>
-  <link rel="stylesheet" href="panel.css"/>
-</head>
+<head><meta charset="UTF-8"/><title>LocatorLens</title><link rel="stylesheet" href="panel.css"/></head>
 <body>
 <div id="app">
+
+  <!-- PRD §9 — Header with 4 pill buttons -->
   <header class="hdr">
     <div class="hdr-brand">
-      <svg class="hdr-logo" width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <svg class="hdr-logo" width="20" height="20" viewBox="0 0 24 24" fill="none">
         <circle cx="11" cy="11" r="8" stroke="#818cf8" stroke-width="2"/>
         <line x1="11" y1="5" x2="11" y2="17" stroke="#818cf8" stroke-width="1.5" stroke-dasharray="2 2"/>
         <line x1="5" y1="11" x2="17" y2="11" stroke="#818cf8" stroke-width="1.5" stroke-dasharray="2 2"/>
@@ -17,95 +15,120 @@
         <line x1="17" y1="17" x2="22" y2="22" stroke="#818cf8" stroke-width="2.5" stroke-linecap="round"/>
       </svg>
       <span class="hdr-title">LocatorLens</span>
-      <span class="hdr-ver">v5</span>
     </div>
-    <div class="hdr-controls">
-      <button id="btn-pick" class="ctl-btn ctl-pick" title="Pick an element on the page">Pick Element</button>
-      <button id="btn-passive" class="ctl-btn" title="Auto-capture every click">Passive</button>
-      <button id="btn-lock" class="ctl-btn" title="Freeze results until unlocked" disabled>Lock</button>
-      <button id="btn-stack" class="ctl-btn" title="Open stack section">Stack 0</button>
+    <div class="hdr-btns">
+      <button id="btn-passive" class="pill" title="Auto-capture every click (PRD §4.2)">Passive</button>
+      <button id="btn-lock" class="pill" title="Freeze results (PRD §4.3)" disabled>Lock</button>
+      <button id="btn-stack" class="pill" title="Open Stack section">Stack <span id="stack-count">0</span></button>
+      <button id="btn-pick" class="pill pill-primary" title="Pick an element (PRD §4.1)">
+        <svg width="11" height="11" viewBox="0 0 12 12" fill="none"><circle cx="6" cy="6" r="5" stroke="currentColor" stroke-width="1.5"/><line x1="6" y1="1" x2="6" y2="11" stroke="currentColor" stroke-width="1.5"/><line x1="1" y1="6" x2="11" y2="6" stroke="currentColor" stroke-width="1.5"/></svg>
+        Pick Element
+      </button>
     </div>
   </header>
 
-  <section id="v-idle" class="view-state">
-    <div class="state-icon">
-      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" opacity="0.3" aria-hidden="true">
-        <circle cx="11" cy="11" r="8" stroke="currentColor" stroke-width="1.5"/>
-        <line x1="17" y1="17" x2="22" y2="22" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-      </svg>
-    </div>
-    <p class="state-title">Ready to inspect</p>
-    <p class="state-sub">Click <strong>Pick Element</strong> to select any element, or enable <strong>Passive</strong> to capture clicks automatically.</p>
+  <!-- Idle -->
+  <section id="v-idle" class="v-state">
+    <svg width="44" height="44" viewBox="0 0 24 24" fill="none" opacity="0.25">
+      <circle cx="11" cy="11" r="8" stroke="currentColor" stroke-width="1.5"/>
+      <line x1="17" y1="17" x2="22" y2="22" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+    </svg>
+    <p class="v-title">Ready to inspect</p>
+    <p class="v-sub">Click <strong>Pick Element</strong> to select, or enable <strong>Passive</strong> to capture clicks automatically.</p>
   </section>
 
-  <section id="v-picking" class="view-state" hidden>
+  <!-- Picking -->
+  <section id="v-picking" class="v-state" style="display:none">
     <div class="pick-ring"></div>
-    <p class="state-title">Picking active…</p>
-    <p class="state-sub">Click any element on the page.<br>Press <kbd>Esc</kbd> to cancel.</p>
+    <p class="v-title">Picking active…</p>
+    <p class="v-sub">Click any element on the page. Press <kbd>Esc</kbd> to cancel.</p>
   </section>
 
-  <section id="v-error" class="view-state" hidden>
-    <p class="state-title err-title">⚠ Error</p>
-    <p id="err-msg" class="state-sub"></p>
+  <!-- Error -->
+  <section id="v-error" class="v-state" style="display:none">
+    <p class="v-title v-err">⚠ Error</p>
+    <p id="err-msg" class="v-sub"></p>
   </section>
 
-  <div id="v-results" class="results-wrap" hidden>
-    <div id="lock-banner" class="lock-banner" hidden>
-      <span>Panel locked — Unlock</span>
-      <button id="btn-unlock" class="sm-btn">Unlock</button>
+  <!-- ═══ Results — 5 collapsible sections (PRD §6) ═══ -->
+  <div id="v-results" class="results" style="display:none">
+
+    <!-- Lock banner (PRD §4.3) -->
+    <div id="lock-banner" class="lock-banner" style="display:none">
+      <span>🔒 Panel locked — click <button id="btn-unlock" class="inline-btn">Unlock</button></span>
     </div>
 
+    <!-- §6.1 Reference -->
     <details id="sec-reference" class="sec" open>
-      <summary class="sec-head">Reference</summary>
-      <div id="reference-body" class="sec-body"></div>
+      <summary class="sec-hd">Reference</summary>
+      <div id="ref-grid" class="sec-bd ref-grid"></div>
     </details>
 
-    <details id="sec-props" class="sec">
-      <summary class="sec-head">Properties</summary>
-      <div id="props-body" class="sec-body"></div>
+    <!-- §6.2 Properties -->
+    <details id="sec-properties" class="sec">
+      <summary class="sec-hd">Properties</summary>
+      <div id="props-body" class="sec-bd"></div>
     </details>
 
+    <!-- §6.3 Locators -->
     <details id="sec-locators" class="sec" open>
-      <summary class="sec-head">
-        <span>Locators</span>
+      <summary class="sec-hd">
+        Locators
         <span id="tier-pills" class="tier-pills"></span>
       </summary>
-      <div id="locators-body" class="sec-body locators-body"></div>
+      <div class="sec-bd loc-body">
+        <!-- Best card -->
+        <div id="best-card" class="best-card" style="display:none"></div>
+        <!-- Tier: Stable -->
+        <div id="tier-stable-hd" class="tier-hd tier-stable-hd" style="display:none">Stable</div>
+        <div id="tier-stable"></div>
+        <!-- Tier: Moderate -->
+        <div id="tier-moderate-hd" class="tier-hd tier-moderate-hd" style="display:none">Moderate</div>
+        <div id="tier-moderate"></div>
+        <!-- Tier: Fragile -->
+        <div id="tier-fragile-hd" class="tier-hd tier-fragile-hd" style="display:none">Fragile</div>
+        <div id="tier-fragile"></div>
+      </div>
     </details>
 
+    <!-- §6.4 Stack -->
     <details id="sec-stack" class="sec">
-      <summary class="sec-head">Stack</summary>
-      <div class="sec-body stack-body">
+      <summary class="sec-hd">Stack</summary>
+      <div class="sec-bd">
         <div class="stack-toolbar">
-          <button id="btn-add-current" class="sm-btn">+ Add current</button>
+          <button id="btn-add-stack" class="sm-btn">+ Add current</button>
           <button id="btn-export-pom" class="sm-btn">Export POM</button>
           <button id="btn-clear-stack" class="sm-btn">Clear</button>
         </div>
-        <div id="stack-list" class="stack-list empty-note">No stacked elements yet.</div>
-        <div id="pom-picker" class="pom-picker" hidden></div>
-        <pre id="pom-output" class="pom-output" hidden></pre>
+        <div id="stack-list" class="stack-list"></div>
+        <div id="pom-picker" class="pom-picker" style="display:none">
+          <button class="pom-btn" data-fw="playwright">Playwright TS</button>
+          <button class="pom-btn" data-fw="selenium">Selenium Java</button>
+          <button class="pom-btn" data-fw="cypress">Cypress JS</button>
+          <button class="pom-btn" data-fw="wdio">WebdriverIO</button>
+          <button class="pom-btn" data-fw="puppeteer">Puppeteer</button>
+          <button class="pom-btn" data-fw="testcafe">TestCafe</button>
+          <button class="pom-btn" data-fw="raw">Raw JSON</button>
+        </div>
       </div>
     </details>
 
+    <!-- §6.5 Live Validator -->
     <details id="sec-validator" class="sec">
-      <summary class="sec-head">Live Validator</summary>
-      <div class="sec-body">
-        <div class="validator-controls">
-          <div class="seg-row" id="val-type-row">
-            <label><input type="radio" name="val-type" value="css" checked> CSS</label>
-            <label><input type="radio" name="val-type" value="xpath"> XPath</label>
-          </div>
-          <div class="seg-row" id="val-mode-row">
-            <label><input type="radio" name="val-mode" value="flash" checked> Flash</label>
-            <label><input type="radio" name="val-mode" value="highlight"> Highlight</label>
-          </div>
+      <summary class="sec-hd">Live Validator</summary>
+      <div class="sec-bd">
+        <div class="val-row">
+          <select id="val-type" class="val-sel"><option value="css">CSS</option><option value="xpath">XPath</option></select>
+          <select id="val-mode" class="val-sel"><option value="flash">Flash</option><option value="highlight">Highlight</option></select>
+          <input id="val-input" class="val-input" placeholder="Enter selector…"/>
+          <button id="val-go" class="sm-btn">Test</button>
         </div>
-        <input id="val-input" class="val-input" placeholder="Enter selector to test…"/>
         <div id="val-result" class="val-result"></div>
-        <div id="val-preview" class="val-preview empty-note">No preview yet.</div>
-        <button id="val-flash" class="sm-btn">Flash</button>
+        <div id="val-preview" class="val-preview"></div>
+        <button id="val-flash" class="sm-btn" style="display:none">Flash</button>
       </div>
     </details>
+
   </div>
 </div>
 <script src="panel.js"></script>

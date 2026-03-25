@@ -1,0 +1,10 @@
+*.crx
+*.zip
+*.pem
+*.der
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+node_modules/

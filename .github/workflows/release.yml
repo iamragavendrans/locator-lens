@@ -1,0 +1,50 @@
+name: Build & Release CRX
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read version
+        id: meta
+        run: |
+          echo "version=$(jq -r .version manifest.json)" >> "$GITHUB_OUTPUT"
+          echo "name=$(jq -r .name manifest.json)" >> "$GITHUB_OUTPUT"
+      - name: Generate signing key
+        run: openssl genrsa -out key.pem 2048
+      - name: Build packages
+        id: build
+        run: |
+          set -euo pipefail
+          NAME="${{ steps.meta.outputs.name }}"
+          VER="${{ steps.meta.outputs.version }}"
+          ZIP="${NAME}-${VER}.zip"
+          CRX="${NAME}-${VER}.crx"
+          zip -r "$ZIP" manifest.json background.js content.js content.css \
+            panel.html panel.css panel.js icons/ \
+            -x '*.git*' 'key.pem' 'README.md' 'LICENSE' '.gitignore' '*.py' 'CONTRIBUTING.md'
+          openssl rsa -in key.pem -pubout -outform DER -out pub.der 2>/dev/null
+          openssl dgst -sha256 -sign key.pem -out sig.der "$ZIP"
+          python3 build_crx3.py pub.der sig.der "$ZIP" "$CRX"
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          echo "crx=$CRX" >> "$GITHUB_OUTPUT"
+          ls -lh "$ZIP" "$CRX"
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "${{ steps.meta.outputs.name }} v${{ steps.meta.outputs.version }}"
+          body: |
+            ## Installation
+            1. Download the `.zip` below → unzip → `chrome://extensions` → Developer mode → Load unpacked
+            2. Or drag the `.crx` onto `chrome://extensions`
+          files: |
+            ${{ steps.build.outputs.zip }}
+            ${{ steps.build.outputs.crx }}
+      - name: Cleanup
+        if: always()
+        run: rm -f key.pem pub.der sig.der

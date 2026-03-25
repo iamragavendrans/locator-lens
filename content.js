@@ -1,505 +1,822 @@
+// LocatorLens v5 — Content Script (PRD §4–7)
 (function () {
   'use strict';
-  if (window.__locatorLensV5) return;
-  window.__locatorLensV5 = true;
+  if (window.__ll5) return;
+  window.__ll5 = true;
 
-  const OVR_ID = '__ll5_overlay__';
-  const TAG_ID = '__ll5_tag__';
-  const FLASH_CLASS = '__ll4flash__';
-  const HIGHLIGHT_CLASS = '__ll4highlight__';
-  const DIM_CLASS = '__ll4dim__';
-  const SAVED_OUTLINE = 'll4OutlinePrev';
-  const SAVED_Z = 'll4ZPrev';
+  // ═══════════════════════════════════════════════════════════════
+  //  CONSTANTS
+  // ═══════════════════════════════════════════════════════════════
+  const OVR_ID = '__ll5ov__';
+  const TAG_ID = '__ll5tg__';
+  const FLASH_CLS  = '__ll5flash__';
+  const DIM_CLS    = '__ll5dim__';
+  const HL_CLS     = '__ll5hl__';
+  let overlayEl = null, tagEl = null;
 
-  let overlayEl = null;
-  let tagEl = null;
-  let cycledMatches = [];
-  let cycleIndex = 0;
+  // ═══════════════════════════════════════════════════════════════
+  //  HELPERS
+  // ═══════════════════════════════════════════════════════════════
 
-  const state = { picking: false, passive: false, lastTarget: null };
+  /* PRD §5.1 — stable ID check (4+ digit run, UUID, framework prefixes, length>55) */
+  function isStableId(id) {
+    if (!id || id.length > 55) return false;
+    if (/^:r[0-9a-z]+:$/i.test(id)) return false;
+    if (/^ember\d+$/i.test(id)) return false;
+    if (/^react-select-\d/i.test(id)) return false;
+    if (/^(mui|ng|v|rc|el|ant|headlessui|radix)-/.test(id)) return false;
+    if (/^[a-f0-9]{8,}$/i.test(id)) return false;
+    if (/\d{4,}/.test(id) && !/\b(zip|code|phone|year|date)\b/i.test(id)) return false;
+    if (/^[a-f0-9-]{36}$/i.test(id)) return false; // UUID
+    return true;
+  }
+
+  /* PRD §5.2 — Dynamic detection (SelectorsHub isAlphaNumeric / isAttributeDynamic port) */
+  function isDynamicClass(cls) {
+    if (!cls) return false;
+    if (/^css-[a-z0-9]+$/i.test(cls)) return true;             // emotion
+    if (/^_[a-z0-9]{5,}$/i.test(cls)) return true;             // CSS modules __hash
+    if (/^sc-[a-zA-Z]/.test(cls)) return true;                  // styled-components
+    if (/^svelte-[a-z0-9]+$/i.test(cls)) return true;           // Svelte
+    if (/^[a-zA-Z]{1,4}[A-Z][a-zA-Z]{1,6}$/.test(cls)) return true; // short mixed-case: bLCLBY, l9NsEV
+    if (/^[a-z]{1,3}-[a-f0-9]{4,}/i.test(cls)) return true;    // hash prefix
+    // SelectorsHub core: any digit in short alphanumeric class
+    if (cls.length <= 10 && /\d/.test(cls) && /^[a-zA-Z0-9]+$/.test(cls)) return true;
+    return false;
+  }
+
+  function isAttrDynamic(val) {
+    if (!val) return false;
+    if (/\d{4,}/.test(val)) return true;
+    if (/^[a-f0-9]{8,}$/i.test(val)) return true;
+    if (/^[a-f0-9-]{36}$/i.test(val)) return true; // UUID
+    return false;
+  }
 
   function xpEsc(str) {
-    if (!String(str).includes("'")) return `'${str}'`;
-    if (!String(str).includes('"')) return `"${str}"`;
-    const parts = String(str).split("'");
-    return `concat('${parts.join(`',"'",'`)}')`;
+    if (!str.includes("'")) return `'${str}'`;
+    if (!str.includes('"')) return `"${str}"`;
+    return `concat('${str.split("'").join("',\"'\",'")}')`; 
   }
+
   function cssEsc(str) {
-    return (window.CSS && CSS.escape) ? CSS.escape(str) : String(str).replace(/([^\w-])/g, '\\$1');
+    return CSS.escape ? CSS.escape(str) : str.replace(/([^\w-])/g, '\\$1');
   }
-  function safeQueryAll(selector) {
-    try { return Array.from(document.querySelectorAll(selector)); } catch { return []; }
+
+  /* PRD §5.3 — SelectorsHub deleteGarbageFromInnerText port */
+  function cleanText(raw) {
+    if (!raw) return '';
+    let t = raw.trim();
+    // Take first non-empty line
+    const lines = t.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+    t = lines[0] || t;
+    // Strip non-ASCII, take longest remaining segment
+    const ascii = t.replace(/[^\x20-\x7E]/g, ' ');
+    const segs = ascii.split(/\s{3,}/);
+    t = segs.reduce((a, b) => b.length > a.length ? b : a, '');
+    // Strip content after /
+    const slashIdx = t.indexOf('/');
+    if (slashIdx > 5) t = t.slice(0, slashIdx);
+    return t.replace(/\s+/g, ' ').trim();
   }
-  function safeXPathAll(selector) {
+
+  /* Extract phrase for long text (up to comma or maxLen) */
+  function extractPhrase(text, maxLen) {
+    maxLen = maxLen || 65;
+    const t = text.trim().replace(/\s+/g, ' ');
+    if (t.length <= maxLen) return t;
+    const comma = t.indexOf(', ');
+    if (comma > 0 && comma <= maxLen) return t.slice(0, comma);
+    const sp = t.lastIndexOf(' ', maxLen);
+    if (sp > 10) return t.slice(0, sp);
+    return t.slice(0, maxLen);
+  }
+
+  function cssCount(sel) { try { return document.querySelectorAll(sel).length; } catch { return -1; } }
+  function xpCount(expr) { try { const r = document.evaluate(expr, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null); return r.snapshotLength; } catch { return -1; } }
+
+  function resolveEls(selector, selectorType, max) {
+    max = max || 50;
+    const els = [];
     try {
-      const result = document.evaluate(selector, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
-      const out = [];
-      for (let i = 0; i < result.snapshotLength; i++) {
-        const item = result.snapshotItem(i);
-        if (item && item.nodeType === 1) out.push(item);
+      if (selectorType === 'xpath') {
+        const r = document.evaluate(selector, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+        for (let i = 0; i < r.snapshotLength && i < max; i++) { const n = r.snapshotItem(i); if (n && n.nodeType === 1) els.push(n); }
+      } else {
+        const nl = document.querySelectorAll(selector);
+        for (let i = 0; i < nl.length && i < max; i++) els.push(nl[i]);
       }
-      return out;
-    } catch {
-      return [];
-    }
+    } catch {}
+    return els;
   }
-  function countCss(sel) { try { return document.querySelectorAll(sel).length; } catch { return 0; } }
-  function countXPath(sel) { return safeXPathAll(sel).length; }
+
   function getDirectText(el) {
-    return Array.from(el.childNodes).filter(n => n.nodeType === Node.TEXT_NODE).map(n => n.textContent).join(' ').replace(/\s+/g, ' ').trim();
+    let t = '';
+    for (const n of el.childNodes) { if (n.nodeType === Node.TEXT_NODE) t += n.textContent; }
+    return t.replace(/\s+/g, ' ').trim();
   }
-  function sanitizeText(text) {
-    const firstLine = String(text || '').split('\n').map(line => line.trim()).find(Boolean) || '';
-    const asciiSegments = firstLine.split(/[^\x20-\x7E]+/).map(s => s.trim()).filter(Boolean);
-    const ascii = asciiSegments.sort((a, b) => b.length - a.length)[0] || firstLine;
-    return ascii.split('/')[0].replace(/\s+/g, ' ').trim();
+
+  function isLeafElement(el) {
+    return el.children.length === 0;
   }
-  function extractPhrase(text, maxLen = 65) {
-    const cleaned = sanitizeText(text);
-    if (!cleaned) return '';
-    if (cleaned.length > 50 || /\s{2,}|[|]{2,}/.test(cleaned)) {
-      const comma = cleaned.indexOf(',');
-      if (comma > 8 && comma <= maxLen) return cleaned.slice(0, comma).trim();
-      return cleaned.slice(0, Math.min(50, cleaned.length)).trim();
-    }
-    if (cleaned.length <= maxLen) return cleaned;
-    const comma = cleaned.indexOf(',');
-    if (comma > 8 && comma <= maxLen) return cleaned.slice(0, comma).trim();
-    return cleaned.slice(0, maxLen).trim();
+
+  function nthIndex(el) {
+    let idx = 1, sib = el.previousElementSibling;
+    while (sib) { idx++; sib = sib.previousElementSibling; }
+    return idx;
   }
+
+  function nthOfTypeIndex(el) {
+    let idx = 1, sib = el.previousElementSibling;
+    while (sib) { if (sib.tagName === el.tagName) idx++; sib = sib.previousElementSibling; }
+    return idx;
+  }
+
   function absoluteXpath(el) {
     const parts = [];
     let cur = el;
     while (cur && cur.nodeType === 1) {
-      let idx = 1;
-      let sib = cur.previousElementSibling;
-      while (sib) {
-        if (sib.tagName === cur.tagName) idx += 1;
-        sib = sib.previousElementSibling;
-      }
-      parts.unshift(`${cur.tagName.toLowerCase()}[${idx}]`);
+      parts.unshift(`${cur.nodeName.toLowerCase()}[${nthOfTypeIndex(cur)}]`);
       cur = cur.parentElement;
     }
     return '/' + parts.join('/');
   }
-  function nthOfType(el) {
-    let idx = 1;
-    let sib = el.previousElementSibling;
-    while (sib) {
-      if (sib.tagName === el.tagName) idx += 1;
-      sib = sib.previousElementSibling;
-    }
-    return idx;
-  }
-  function nthChild(el) {
-    let idx = 1;
-    let sib = el.previousElementSibling;
-    while (sib) { idx += 1; sib = sib.previousElementSibling; }
-    return idx;
-  }
-  function attributeMap(el) {
-    return Object.fromEntries(Array.from(el.attributes || []).map(attr => [attr.name, attr.value]));
-  }
-  function looksAutoGenerated(value) {
-    if (!value) return false;
-    return /\d/.test(value) || /:r\w+:/.test(value) || /^ember\d+/i.test(value) || /^mui-\d+/i.test(value) || /^[a-f0-9]{8,}$/i.test(value) || /[a-f0-9]{8}-[a-f0-9]{4}-/i.test(value) || value.length > 55;
-  }
-  function getStableId(id) {
-    return id && !looksAutoGenerated(id) ? id : '';
-  }
-  function isDynamicClass(cls) {
-    return !!cls && (/\d/.test(cls) || /__\w{4,}/.test(cls) || /^sc-/.test(cls) || /^css-/.test(cls) || /^[a-zA-Z]{1,3}[A-Z][a-zA-Z0-9]{2,}$/.test(cls) || /^[a-z0-9]{5,8}$/i.test(cls));
-  }
-  function stableClasses(el) { return Array.from(el.classList || []).filter(cls => !isDynamicClass(cls)); }
-  function dynamicClasses(el) { return Array.from(el.classList || []).filter(cls => isDynamicClass(cls)); }
-  function accessibleName(el) {
-    return el.getAttribute('aria-label') || el.innerText?.trim() || el.getAttribute('alt') || el.getAttribute('title') || '';
-  }
-  function optimizeXPath(selector) {
-    if (!selector.includes('/')) return selector;
-    const segments = selector.split('//').filter(Boolean);
-    if (segments.length <= 1) return selector;
-    for (let i = segments.length - 1; i >= 0; i--) {
-      const candidate = '//' + segments.slice(i).join('//');
-      if (countXPath(candidate) === 1) return candidate;
-    }
-    return selector;
-  }
-  function countForSelector(selector, selectorType) {
-    return selectorType === 'xpath' ? countXPath(selector) : countCss(selector);
-  }
-  function addLocator(locators, seq, loc) {
-    const count = countForSelector(loc.selector, loc.selectorType);
-    let score = loc.score;
-    if (count > 1 && count <= 5) score -= 14;
-    else if (count > 5 && count <= 20) score -= 28;
-    else if (count > 20) score -= 42;
-    if (count === 0) score = 0;
-    const item = {
-      id: seq.value++,
-      ...loc,
-      score: Math.max(0, Math.round(score)),
-      matchCount: count,
-      fieldSeed: loc.meta?.textValue || loc.meta?.attributeValue || loc.label
-    };
-    locators.push(item);
-  }
 
-  function generateCssPath(el) {
-    const segments = [];
-    let cur = el;
-    while (cur && cur.nodeType === 1 && cur !== document.body) {
-      const testAttr = ['data-testid', 'data-test', 'data-cy', 'data-qa', 'data-automation-id', 'data-test-id', 'data-e2e'].find(attr => cur.hasAttribute(attr));
-      if (testAttr) {
-        segments.unshift(`[${testAttr}="${cur.getAttribute(testAttr).replace(/"/g, '\\"')}"]`);
-        break;
+  /* Walk ancestors to find one with a stable anchor */
+  function findAnchorAncestor(el) {
+    let cur = el.parentElement;
+    let depth = 0;
+    while (cur && cur !== document.body && depth < 8) {
+      const testAttrs = ['data-testid', 'data-test-id', 'data-cy', 'data-test', 'data-qa', 'data-automation-id', 'data-e2e'];
+      for (const ta of testAttrs) {
+        if (cur.getAttribute(ta)) return { el: cur, type: 'test-attr', attr: ta, val: cur.getAttribute(ta), score: 78 };
       }
-      const stableId = getStableId(cur.id);
-      if (stableId) {
-        segments.unshift(`#${cssEsc(stableId)}`);
-        break;
+      if (cur.id && isStableId(cur.id)) return { el: cur, type: 'id', val: cur.id, score: 76 };
+      if (cur.getAttribute('aria-label')) return { el: cur, type: 'aria', val: cur.getAttribute('aria-label'), score: 75 };
+      const stableC = Array.from(cur.classList || []).filter(c => !isDynamicClass(c));
+      if (stableC.length > 0 && cssCount(`${cur.tagName.toLowerCase()}.${cssEsc(stableC[0])}`) <= 3) {
+        return { el: cur, type: 'class', val: stableC[0], tag: cur.tagName.toLowerCase(), score: 60 };
       }
-      if (cur.getAttribute('aria-label')) {
-        segments.unshift(`${cur.tagName.toLowerCase()}[aria-label="${cur.getAttribute('aria-label').replace(/"/g, '\\"')}"]`);
-        break;
-      }
-      const stable = stableClasses(cur);
-      if (stable.length) segments.unshift(`${cur.tagName.toLowerCase()}.${cssEsc(stable[0])}`);
-      else segments.unshift(`${cur.tagName.toLowerCase()}:nth-of-type(${nthOfType(cur)})`);
-      const candidate = segments.join(' > ');
-      if (countCss(candidate) === 1) break;
       cur = cur.parentElement;
+      depth++;
     }
-    return segments.join(' > ');
+    return null;
   }
 
-  function buildRelativeXPath(el) {
-    const priority = ['placeholder', 'title', 'value', 'name', 'aria-label', 'alt', 'for', 'data-label', 'role', 'type', 'class'];
-    const tag = el.tagName.toLowerCase();
-    for (const attr of priority) {
-      const value = el.getAttribute(attr);
-      if (!value || (attr === 'class' && isDynamicClass(value))) continue;
-      const selector = `//${tag}[@${attr}=${xpEsc(value)}]`;
-      if (countXPath(selector) === 1) return selector;
+  // ═══════════════════════════════════════════════════════════════
+  //  PRD §5.4 — XPath Optimization (SelectorsHub optimizeXpath port)
+  // ═══════════════════════════════════════════════════════════════
+  function optimizeXpath(fullXpath) {
+    // Find deepest predicate with meaningful anchor (length>3)
+    const segments = fullXpath.replace(/^\/\//, '').split('/');
+    for (let i = segments.length - 1; i >= 0; i--) {
+      if (/\[.{4,}\]/.test(segments[i])) {
+        const candidate = '//' + segments.slice(i).join('/');
+        if (xpCount(candidate) === 1) return candidate;
+      }
     }
-    const text = extractPhrase(el.textContent || '');
-    if (text) {
-      const selector = optimizeXPath(`//${tag}[contains(normalize-space(),${xpEsc(text)})]`);
-      if (countXPath(selector) >= 1) return selector;
+    // Fallback: strip leading segments one at a time
+    for (let i = 1; i < segments.length; i++) {
+      const candidate = '//' + segments.slice(i).join('/');
+      if (xpCount(candidate) === 1) return candidate;
     }
-    return optimizeXPath(absoluteXpath(el));
+    return fullXpath;
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  //  LOCATOR ENGINE — PRD §5.1 all strategies
+  // ═══════════════════════════════════════════════════════════════
   function generateLocators(el) {
     const tag = el.tagName.toLowerCase();
-    const attrs = attributeMap(el);
     const id = el.id || '';
-    const idStable = !!getStableId(id);
-    const rawText = (el.textContent || '').replace(/\s+/g, ' ').trim();
-    const textPreview = extractPhrase(rawText, 65);
-    const fullTextPreview = rawText.slice(0, 200);
-    const locators = [];
-    const seq = { value: 0 };
-    const role = el.getAttribute('role') || '';
-    const accName = accessibleName(el);
-    const placeholder = el.getAttribute('placeholder') || '';
-    const title = el.getAttribute('title') || '';
-    const alt = el.getAttribute('alt') || '';
-    const href = el.getAttribute('href') || '';
-    const value = el.getAttribute('value') || '';
     const name = el.getAttribute('name') || '';
-    const stable = stableClasses(el);
-    const dynamic = dynamicClasses(el);
-
-    ['data-testid', 'data-test', 'data-cy', 'data-qa', 'data-automation-id', 'data-test-id', 'data-e2e'].forEach(attr => {
-      const val = el.getAttribute(attr);
-      if (!val) return;
-      addLocator(locators, seq, { category: 'test', type: attr, label: `Test attribute ${attr}`, selector: `[${attr}="${val.replace(/"/g, '\\"')}"]`, selectorType: 'css', score: 95, reason: `Uses ${attr}, which is typically the most stable automation hook.`, meta: { attributeName: attr, attributeValue: val } });
-      addLocator(locators, seq, { category: 'test', type: `${attr}-xpath`, label: `Test attribute ${attr}`, selector: `//*[@${attr}=${xpEsc(val)}]`, selectorType: 'xpath', score: 95, reason: `XPath fallback for ${attr}.`, meta: { attributeName: attr, attributeValue: val } });
-    });
-    if (attrs['aria-label']) addLocator(locators, seq, { category: 'aria', type: 'aria-label', label: 'ARIA label', selector: `[aria-label="${attrs['aria-label'].replace(/"/g, '\\"')}"]`, selectorType: 'css', score: 87, reason: 'Accessible labels are usually stable and human-readable.', meta: { attributeName: 'aria-label', attributeValue: attrs['aria-label'] } });
-    if (role && accName) addLocator(locators, seq, { category: 'logical', type: 'role+text', label: 'Role + accessible name', selector: `//*[@role=${xpEsc(role)} and contains(normalize-space(),${xpEsc(extractPhrase(accName, 40))})]`, selectorType: 'xpath', score: 85, reason: 'Combines semantic role with visible or accessible text.', meta: { role, textValue: extractPhrase(accName, 40) } });
-    if (attrs['aria-labelledby']) addLocator(locators, seq, { category: 'aria', type: 'aria-labelledby', label: 'ARIA labelledby', selector: `//*[@aria-labelledby=${xpEsc(attrs['aria-labelledby'])}]`, selectorType: 'xpath', score: 78, reason: 'Anchors on linked accessible naming.', meta: { attributeName: 'aria-labelledby', attributeValue: attrs['aria-labelledby'] } });
-
-    if (idStable) addLocator(locators, seq, { category: 'id', type: 'stable-id', label: 'Stable ID', selector: `#${cssEsc(id)}`, selectorType: 'css', score: 90, reason: 'ID passed the stability filters.', meta: { attributeName: 'id', attributeValue: id } });
-    if (id && !idStable) addLocator(locators, seq, { category: 'id', type: 'auto-id', label: 'Auto-generated ID', selector: `//*[@id=${xpEsc(id)}]`, selectorType: 'xpath', score: 18, reason: 'Generated as fallback only.', warning: 'POSSIBLY DYNAMIC — verify stability before using.', meta: { attributeName: 'id', attributeValue: id } });
-    if (name) addLocator(locators, seq, { category: 'attr', type: 'name', label: 'Name attribute', selector: `[name="${name.replace(/"/g, '\\"')}"]`, selectorType: 'css', score: 80, reason: 'Useful for form fields.', meta: { attributeName: 'name', attributeValue: name } });
-    if (placeholder) addLocator(locators, seq, { category: 'attr', type: 'placeholder', label: 'Placeholder', selector: `//*[@placeholder=${xpEsc(placeholder)}]`, selectorType: 'xpath', score: 72, reason: 'Helpful when placeholders are product copy.', meta: { attributeName: 'placeholder', attributeValue: placeholder } });
-    if (alt) addLocator(locators, seq, { category: 'attr', type: 'alt', label: 'Alt text', selector: `//*[@alt=${xpEsc(alt)}]`, selectorType: 'xpath', score: 74, reason: 'Strong for images and icon buttons.', meta: { attributeName: 'alt', attributeValue: alt } });
-    if (title) addLocator(locators, seq, { category: 'attr', type: 'title', label: 'Title attribute', selector: `//*[@title=${xpEsc(title)}]`, selectorType: 'xpath', score: 63, reason: 'A lightweight attribute fallback.', meta: { attributeName: 'title', attributeValue: title } });
-    if (href && tag === 'a' && href !== '#' && href !== '/') addLocator(locators, seq, { category: 'attr', type: 'href', label: 'Href anchor', selector: `//a[contains(@href,${xpEsc(href.replace(/[?#].*$/, '').split('/').filter(Boolean).pop() || href)})]`, selectorType: 'xpath', score: 65, reason: 'Uses a non-trivial href fingerprint.', meta: { attributeName: 'href', attributeValue: href } });
-    if (value && (tag === 'input' || tag === 'button')) addLocator(locators, seq, { category: 'attr', type: 'value', label: 'Value attribute', selector: `//*[@value=${xpEsc(value)}]`, selectorType: 'xpath', score: 68, reason: 'Good for submit and button controls.', meta: { attributeName: 'value', attributeValue: value } });
-
-    stable.slice(0, 3).forEach(cls => addLocator(locators, seq, { category: 'class', type: 'stable-class', label: `Stable class ${cls}`, selector: `//${tag}[contains(@class,${xpEsc(cls)})]`, selectorType: 'xpath', score: 45, reason: 'Stable class fragment locator.', meta: { attributeName: 'class', attributeValue: cls } }));
-    if (stable.length >= 2) addLocator(locators, seq, { category: 'class', type: 'stable-class-multi', label: 'Multiple stable classes', selector: `//${tag}[contains(@class,${xpEsc(stable[0])}) and contains(@class,${xpEsc(stable[1])})]`, selectorType: 'xpath', score: 52, reason: 'Combines stable classes for extra precision.' });
-    dynamic.slice(0, 2).forEach(cls => addLocator(locators, seq, { category: 'class', type: 'dynamic-class', label: `Dynamic class ${cls}`, selector: `//${tag}[contains(@class,${xpEsc(cls)})]`, selectorType: 'xpath', score: 28, reason: 'Retained as a fallback even though the class looks generated.', warning: 'POSSIBLY DYNAMIC — verify stability before using', meta: { attributeName: 'class', attributeValue: cls } }));
-    if (dynamic[0]) {
-      let ancestorClass = '';
-      let cur = el.parentElement;
-      while (cur && !ancestorClass) {
-        ancestorClass = stableClasses(cur)[0] || '';
-        cur = cur.parentElement;
-      }
-      if (ancestorClass) addLocator(locators, seq, { category: 'class', type: 'dynamic-class-scoped', label: 'Dynamic class scoped', selector: `//*[contains(@class,${xpEsc(ancestorClass)})]//${tag}[contains(@class,${xpEsc(dynamic[0])})]`, selectorType: 'xpath', score: 40, reason: 'Scopes a dynamic class to a stable ancestor.' });
-    }
-
-    const directText = extractPhrase(getDirectText(el), 65);
-    if (directText && !el.children.length) addLocator(locators, seq, { category: 'text', type: 'text-exact', label: 'Exact text', selector: `//${tag}[text()=${xpEsc(directText)}]`, selectorType: 'xpath', score: 52, reason: 'Leaf exact-text locator.', meta: { textValue: directText } });
-    if (textPreview) addLocator(locators, seq, { category: 'text', type: 'text-normalize', label: 'Normalized text', selector: `//${tag}[normalize-space()=${xpEsc(textPreview)}]`, selectorType: 'xpath', score: 68, reason: 'Normalized text handles whitespace variation.', meta: { textValue: textPreview } });
-    if (rawText.length > 50 && textPreview) addLocator(locators, seq, { category: 'text', type: 'text-contains', label: 'Text contains', selector: `//${tag}[contains(normalize-space(),${xpEsc(textPreview)})]`, selectorType: 'xpath', score: 64, reason: 'Uses the first natural phrase for longer content.', meta: { textValue: textPreview } });
-    if (tag === 'a' && textPreview) {
-      addLocator(locators, seq, { category: 'text', type: 'link-text', label: 'Link text', selector: `//a[normalize-space(.)=${xpEsc(textPreview)}]`, selectorType: 'xpath', score: 68, reason: 'Exact link text locator.', meta: { textValue: textPreview } });
-      addLocator(locators, seq, { category: 'text', type: 'partial-link-text', label: 'Partial link text', selector: `//a[contains(text(),${xpEsc(textPreview.slice(0, 30))})]`, selectorType: 'xpath', score: 58, reason: 'Shorter link text fingerprint.', meta: { textValue: textPreview.slice(0, 30) } });
-    }
-
-    Array.from(el.querySelectorAll('a[href]')).slice(0, 2).forEach(child => {
-      const childHref = child.getAttribute('href');
-      const fragment = childHref?.split('/').filter(Boolean).pop();
-      if (fragment) addLocator(locators, seq, { category: 'hierarchy', type: 'child-anchor', label: 'Child anchor href', selector: `//${tag}[.//a[contains(@href,${xpEsc(fragment)})]]`, selectorType: 'xpath', score: 70, reason: 'Uses a descendant link as a stable fingerprint.' });
-    });
-    Array.from(el.querySelectorAll('b,strong')).slice(0, 1).forEach(child => {
-      const t = extractPhrase(child.textContent || '', 40);
-      if (t) addLocator(locators, seq, { category: 'hierarchy', type: 'child-bold-text', label: 'Child bold text', selector: `//${tag}[.//${child.tagName.toLowerCase()}[normalize-space()=${xpEsc(t)}]]`, selectorType: 'xpath', score: 65, reason: 'Anchors on emphasized descendant text.' });
-    });
-
-    const parent = el.parentElement;
-    if (parent) {
-      const pId = getStableId(parent.id || '');
-      const pTag = parent.tagName.toLowerCase();
-      const childIdx = nthChild(el);
-      if (pId) {
-        addLocator(locators, seq, { category: 'hierarchy', type: 'ancestor-descendant', label: 'Ancestor descendant', selector: `#${cssEsc(pId)} ${tag}`, selectorType: 'css', score: 78, reason: 'Uses a stable parent ID anchor.' });
-        addLocator(locators, seq, { category: 'hierarchy', type: 'parent-child', label: 'Parent child', selector: `#${cssEsc(pId)} > ${tag}:nth-child(${childIdx})`, selectorType: 'css', score: 74, reason: 'Direct child relationship from stable parent.' });
-      }
-      const labelSibling = parent.querySelector('label');
-      if ((tag === 'input' || tag === 'textarea' || tag === 'select') && labelSibling) {
-        const labelText = extractPhrase(labelSibling.textContent || '', 40);
-        if (labelText) addLocator(locators, seq, { category: 'hierarchy', type: 'following-sibling', label: 'Following sibling', selector: `//label[normalize-space()=${xpEsc(labelText)}]/following-sibling::${tag}[1]`, selectorType: 'xpath', score: 60, reason: 'Anchors off a nearby label.', meta: { textValue: labelText } });
-      }
-      const prev = el.previousElementSibling;
-      if (prev) addLocator(locators, seq, { category: 'hierarchy', type: 'preceding-sibling', label: 'Preceding sibling', selector: `//${prev.tagName.toLowerCase()}[${nthOfType(prev)}]/following-sibling::${tag}[1]`, selectorType: 'xpath', score: 55, reason: 'Uses sibling position as fallback.' });
-      if (role && textPreview) addLocator(locators, seq, { category: 'logical', type: 'role-text', label: 'Role + text', selector: `//*[@role=${xpEsc(role)} and contains(normalize-space(),${xpEsc(textPreview)})]`, selectorType: 'xpath', score: 72, reason: 'Dual anchor using semantics and text.', meta: { role, textValue: textPreview } });
-      if (stable[0] && textPreview) addLocator(locators, seq, { category: 'logical', type: 'class-text', label: 'Class + text', selector: `//${tag}[contains(@class,${xpEsc(stable[0])}) and contains(normalize-space(),${xpEsc(textPreview)})]`, selectorType: 'xpath', score: 63, reason: 'Combines a stable class with text.', meta: { textValue: textPreview } });
-      if (dynamic[0] && textPreview) addLocator(locators, seq, { category: 'logical', type: 'dynclass-text', label: 'Dynamic class + text', selector: `//${tag}[contains(@class,${xpEsc(dynamic[0])}) and contains(normalize-space(),${xpEsc(textPreview)})]`, selectorType: 'xpath', score: 55, reason: 'Dual anchor fallback when class or text changes independently.', warning: 'POSSIBLY DYNAMIC — verify stability before using', meta: { textValue: textPreview } });
-    }
-
-    if (id && !idStable) {
-      const stablePrefix = id.match(/^[A-Za-z_-]+/)?.[0];
-      if (stablePrefix) addLocator(locators, seq, { category: 'id', type: 'id-starts-with', label: 'ID prefix', selector: `//${tag}[starts-with(@id,${xpEsc(stablePrefix)})]`, selectorType: 'xpath', score: 42, reason: 'Uses only the stable-looking ID prefix.', meta: { attributeName: 'id', attributeValue: stablePrefix } });
-    }
-
-    const cssPath = generateCssPath(el);
-    if (cssPath) addLocator(locators, seq, { category: 'css', type: 'css-path', label: 'CSS path', selector: cssPath, selectorType: 'css', score: cssPath.includes('nth-of-type') ? 30 : cssPath.startsWith('#') ? 78 : cssPath.includes('data-') ? 82 : cssPath.includes('aria-label') ? 75 : 50, reason: 'Anchored CSS path that stops once unique.', meta: { attributeName: 'cssPath', attributeValue: cssPath } });
-    const relativeXPath = buildRelativeXPath(el);
-    if (relativeXPath) addLocator(locators, seq, { category: 'xpath', type: 'relative-xpath', label: 'Relative XPath', selector: relativeXPath, selectorType: 'xpath', score: 70, reason: 'Built from preferred attributes with optimization.', meta: { attributeName: 'xpath', attributeValue: relativeXPath } });
-    addLocator(locators, seq, { category: 'position', type: 'position-xpath', label: 'Position-based XPath', selector: `(//${tag})[${nthOfType(el)}]`, selectorType: 'xpath', score: 20, reason: 'Pure positional fallback and intentionally fragile.' });
-    addLocator(locators, seq, { category: 'absolute', type: 'absolute-xpath', label: 'Absolute XPath', selector: absoluteXpath(el), selectorType: 'xpath', score: 8, reason: 'Full DOM path fallback only.' });
-
-    const rank = item => item.type === 'absolute-xpath' ? 9999 : item.type === 'position-xpath' ? 9998 : -item.score;
-    locators.sort((a, b) => rank(a) - rank(b));
-
+    const type = el.getAttribute('type') || '';
+    const rawText = (el.textContent || '').trim();
+    const ownText = getDirectText(el);
+    const cleaned = cleanText(rawText);
+    const attrs = {};
+    for (const a of el.attributes) attrs[a.name] = a.value;
+    const classList = Array.from(el.classList || []);
     const rect = el.getBoundingClientRect();
+    const cs = getComputedStyle(el);
+    const locators = [];
+    let seq = 0;
+
+    /* PRD §5.5 scoring adjustment */
+    function add(category, label, selector, selectorType, baseScore, extra) {
+      const count = selectorType === 'xpath' ? xpCount(selector) : cssCount(selector);
+      let score = baseScore;
+      if (count === 0) score = 0;
+      else if (count === 1) { /* base score stands */ }
+      else if (count >= 2 && count <= 5) score = Math.max(score - 14, 1);
+      else if (count >= 6 && count <= 20) score = Math.max(score - 28, 1);
+      else if (count > 20) score = Math.max(score - 42, 1);
+      if (count < 0) score = 0; // invalid selector
+      locators.push({
+        id: seq++, category, label, selector, selectorType,
+        score: Math.round(score), matchCount: Math.max(count, 0),
+        ...(extra || {})
+      });
+    }
+
+    // ── 1. Test Attributes (PRD score 95) ─────────────────────────
+    const testAttrs = ['data-testid', 'data-test-id', 'data-cy', 'data-test', 'data-qa', 'data-automation-id', 'data-e2e'];
+    for (const ta of testAttrs) {
+      const v = el.getAttribute(ta);
+      if (v) {
+        add('test', `${ta}`, `[${ta}="${v}"]`, 'css', 95);
+        add('test', `xpath ${ta}`, `//*[@${ta}=${xpEsc(v)}]`, 'xpath', 95);
+      }
+    }
+
+    // ── 2. ARIA (PRD scores 78–87) ────────────────────────────────
+    const ariaLabel = el.getAttribute('aria-label');
+    const ariaLabelledBy = el.getAttribute('aria-labelledby');
+    const role = el.getAttribute('role');
+
+    if (ariaLabel) {
+      add('aria', 'aria-label', `[aria-label="${ariaLabel}"]`, 'css', 87);
+      add('aria', 'xpath aria-label', `//*[@aria-label=${xpEsc(ariaLabel)}]`, 'xpath', 87);
+    }
+    if (role && ariaLabel) {
+      add('aria', 'role+name', `[role="${role}"][aria-label="${ariaLabel}"]`, 'css', 85);
+    }
+    if (ariaLabelledBy) {
+      add('aria', 'aria-labelledby', `[aria-labelledby="${ariaLabelledBy}"]`, 'css', 78);
+    }
+    if (role) {
+      add('aria', 'role', `[role="${role}"]`, 'css', 60);
+    }
+
+    // ── 3. Stable ID (PRD score 90) ───────────────────────────────
+    if (id && isStableId(id)) {
+      add('id', 'id', `#${cssEsc(id)}`, 'css', 90);
+      add('id', 'xpath id', `//*[@id=${xpEsc(id)}]`, 'xpath', 90);
+    }
+    // Auto-generated ID (PRD score 18)
+    if (id && !isStableId(id)) {
+      add('id', 'auto-id', `#${cssEsc(id)}`, 'css', 18, { warning: 'Auto-generated ID — likely unstable across sessions' });
+    }
+
+    // ── 4. Name (PRD score 80) ────────────────────────────────────
+    if (name) {
+      add('attr', 'name', `[name="${name}"]`, 'css', 80);
+      add('attr', 'xpath name', `//*[@name=${xpEsc(name)}]`, 'xpath', 80);
+    }
+
+    // ── 5. Placeholder (PRD score 72) ─────────────────────────────
+    const placeholder = el.getAttribute('placeholder');
+    if (placeholder) {
+      add('attr', 'placeholder', `[placeholder="${placeholder}"]`, 'css', 72);
+      add('attr', 'xpath placeholder', `//*[@placeholder=${xpEsc(placeholder)}]`, 'xpath', 72);
+    }
+
+    // ── 6. Alt text (PRD score 74) ────────────────────────────────
+    const alt = el.getAttribute('alt');
+    if (alt) {
+      add('attr', 'alt', `${tag}[alt="${alt}"]`, 'css', 74);
+      add('attr', 'xpath alt', `//${tag}[@alt=${xpEsc(alt)}]`, 'xpath', 74);
+    }
+
+    // ── 7. Title (PRD score 63) ───────────────────────────────────
+    const title = el.getAttribute('title');
+    if (title) {
+      add('attr', 'title', `[title="${title}"]`, 'css', 63);
+      add('attr', 'xpath title', `//*[@title=${xpEsc(title)}]`, 'xpath', 63);
+    }
+
+    // ── 8. Value (PRD score 68) ───────────────────────────────────
+    const value = el.getAttribute('value');
+    if (value && (tag === 'input' || tag === 'button' || tag === 'option')) {
+      add('attr', 'value', `${tag}[value="${value}"]`, 'css', 68);
+    }
+
+    // ── 9. For attribute ──────────────────────────────────────────
+    const forAttr = el.getAttribute('for');
+    if (forAttr) add('attr', 'for', `[for="${forAttr}"]`, 'css', 80);
+
+    // ── 10. Href (PRD score 65) ───────────────────────────────────
+    const href = el.getAttribute('href');
+    if (href && tag === 'a' && href !== '#' && href !== '/') {
+      const clean = href.replace(/[?#].*/, '');
+      if (clean && clean.length < 100) add('attr', 'href', `a[href="${clean}"]`, 'css', 65);
+      const tail = clean.split('/').filter(Boolean).pop();
+      if (tail && tail.length > 1) add('attr', 'xpath href', `//a[contains(@href,${xpEsc(tail)})]`, 'xpath', 65);
+    }
+
+    // ── 11. Link text (PRD score 68) ──────────────────────────────
+    if (tag === 'a' && cleaned) {
+      if (cleaned.length <= 80) add('text', 'link-text', `//a[normalize-space(.)=${xpEsc(cleaned)}]`, 'xpath', 68);
+      if (cleaned.length > 30) {
+        const partial = extractPhrase(cleaned, 30);
+        add('text', 'partial-link-text', `//a[contains(text(),${xpEsc(partial)})]`, 'xpath', 58);
+      }
+    }
+
+    // ── 12. Text strategies (PRD scores 52–68) ────────────────────
+    if (cleaned && cleaned.length > 0) {
+      // Text exact text()= for leaf elements (PRD 52)
+      if (isLeafElement(el) && cleaned.length <= 80) {
+        add('text', 'text-exact', `//${tag}[text()=${xpEsc(cleaned)}]`, 'xpath', 52);
+      }
+      // normalize-space exact (PRD 68)
+      if (cleaned.length <= 80) {
+        add('text', 'normalize-space', `//${tag}[normalize-space()=${xpEsc(cleaned)}]`, 'xpath', 68);
+      }
+      // contains for long text (PRD 64) — uses first phrase
+      if (cleaned.length > 3) {
+        const phrase = extractPhrase(cleaned, 65);
+        const hasJunk = /\s{2,}/.test(rawText.slice(0, 80)) || cleaned.length > 50;
+        if (hasJunk || phrase !== cleaned) {
+          add('text', 'text-contains', `//${tag}[contains(normalize-space(),${xpEsc(phrase)})]`, 'xpath', 64);
+        }
+      }
+    }
+
+    // ── 13. Class strategies ──────────────────────────────────────
+    const staticClasses = classList.filter(c => !isDynamicClass(c));
+    const dynamicClasses = classList.filter(c => isDynamicClass(c));
+
+    // Stable class — contains() (PRD score 45)
+    for (const cls of staticClasses.slice(0, 3)) {
+      add('class', `class .${cls}`, `//${tag}[contains(@class,${xpEsc(cls)})]`, 'xpath', 45);
+    }
+    // Stable class — multi (PRD score 52)
+    if (staticClasses.length >= 2) {
+      const a = staticClasses[0], b = staticClasses[1];
+      add('class', 'class-multi', `//${tag}[contains(@class,${xpEsc(a)}) and contains(@class,${xpEsc(b)})]`, 'xpath', 52);
+    }
+    // Dynamic class — contains() (PRD score 28)
+    for (const cls of dynamicClasses.slice(0, 2)) {
+      add('class', `dyn-class .${cls}`, `//${tag}[contains(@class,${xpEsc(cls)})]`, 'xpath', 28,
+        { warning: 'POSSIBLY DYNAMIC — verify stability before using' });
+    }
+    // Dynamic class — scoped with ancestor (PRD score 40)
+    if (dynamicClasses.length > 0) {
+      const anc = findAnchorAncestor(el);
+      if (anc && anc.type !== 'class') {
+        const dc = dynamicClasses[0];
+        let ancSel = '';
+        if (anc.type === 'test-attr') ancSel = `//*[@${anc.attr}=${xpEsc(anc.val)}]`;
+        else if (anc.type === 'id') ancSel = `//*[@id=${xpEsc(anc.val)}]`;
+        else if (anc.type === 'aria') ancSel = `//*[@aria-label=${xpEsc(anc.val)}]`;
+        if (ancSel) {
+          add('class', 'dyn-class-scoped', `${ancSel}//${tag}[contains(@class,${xpEsc(dc)})]`, 'xpath', 40,
+            { warning: 'Dynamic class scoped by ancestor — more stable but verify' });
+        }
+      }
+    }
+
+    // ── 14. Child-anchor strategy (PRD score 70) ──────────────────
+    const childLinks = el.querySelectorAll(':scope a[href], :scope b, :scope strong, :scope img[alt]');
+    const seenChild = new Set();
+    for (const ch of Array.from(childLinks).slice(0, 5)) {
+      const ct = ch.tagName.toLowerCase();
+      if (ct === 'a') {
+        const h = ch.getAttribute('href');
+        if (h && h.length > 1 && h.length < 120 && !seenChild.has('a-' + h)) {
+          seenChild.add('a-' + h);
+          const part = h.split('/').filter(Boolean).pop() || h;
+          add('hierarchy', 'child-link-href', `//${tag}[.//a[contains(@href,${xpEsc(part)})]]`, 'xpath', 70);
+        }
+      }
+      if ((ct === 'b' || ct === 'strong') && ch.textContent.trim()) {
+        const bt = ch.textContent.trim();
+        if (bt.length > 1 && bt.length < 80 && !seenChild.has('b-' + bt)) {
+          seenChild.add('b-' + bt);
+          add('hierarchy', 'child-bold-text', `//${tag}[.//${ct}[normalize-space()=${xpEsc(extractPhrase(bt, 50))}]]`, 'xpath', 65);
+        }
+      }
+      if (ct === 'img') {
+        const a2 = ch.getAttribute('alt');
+        if (a2 && !seenChild.has('img-' + a2)) {
+          seenChild.add('img-' + a2);
+          add('hierarchy', 'child-img-alt', `//${tag}[.//img[@alt=${xpEsc(a2)}]]`, 'xpath', 65);
+        }
+      }
+    }
+
+    // ── 15. Ancestor//descendant scoped (PRD score 72–78) ─────────
+    const anchor = findAnchorAncestor(el);
+    if (anchor) {
+      let ancXp = '';
+      if (anchor.type === 'test-attr') ancXp = `//*[@${anchor.attr}=${xpEsc(anchor.val)}]`;
+      else if (anchor.type === 'id') ancXp = `//*[@id=${xpEsc(anchor.val)}]`;
+      else if (anchor.type === 'aria') ancXp = `//*[@aria-label=${xpEsc(anchor.val)}]`;
+      else if (anchor.type === 'class') ancXp = `//${anchor.tag}[contains(@class,${xpEsc(anchor.val)})]`;
+
+      if (ancXp) {
+        // CSS version
+        let ancCss = '';
+        if (anchor.type === 'test-attr') ancCss = `[${anchor.attr}="${anchor.val}"]`;
+        else if (anchor.type === 'id') ancCss = `#${cssEsc(anchor.val)}`;
+        else if (anchor.type === 'aria') ancCss = `[aria-label="${anchor.val}"]`;
+        else if (anchor.type === 'class') ancCss = `${anchor.tag}.${cssEsc(anchor.val)}`;
+
+        add('hierarchy', 'ancestor-descendant', `${ancXp}//${tag}`, 'xpath', anchor.score);
+        if (ancCss) add('hierarchy', 'ancestor-css', `${ancCss} ${tag}`, 'css', anchor.score - 2);
+      }
+    }
+
+    // ── 16. Parent/child direct (PRD score 68–74) ─────────────────
+    const parent = el.parentElement;
+    if (parent && parent !== document.body) {
+      const pTag = parent.tagName.toLowerCase();
+      const nth = nthIndex(el);
+      if (parent.id && isStableId(parent.id)) {
+        add('hierarchy', 'parent-id>child', `#${cssEsc(parent.id)} > ${tag}:nth-child(${nth})`, 'css', 74);
+        add('hierarchy', 'xpath-parent-id', `//*[@id=${xpEsc(parent.id)}]/${tag}[${nthOfTypeIndex(el)}]`, 'xpath', 72);
+      }
+      const pTestAttr = testAttrs.find(a => parent.getAttribute(a));
+      if (pTestAttr) {
+        add('hierarchy', 'parent-testattr>child', `[${pTestAttr}="${parent.getAttribute(pTestAttr)}"] > ${tag}:nth-child(${nth})`, 'css', 74);
+      }
+      const pStatic = Array.from(parent.classList || []).filter(c => !isDynamicClass(c));
+      if (pStatic.length > 0) {
+        add('hierarchy', 'parent-class>child', `${pTag}.${cssEsc(pStatic[0])} > ${tag}:nth-child(${nth})`, 'css', 68);
+      }
+    }
+
+    // ── 17. Following-sibling (PRD score 60) ──────────────────────
+    const prevSib = el.previousElementSibling;
+    if (prevSib) {
+      const pSibTag = prevSib.tagName.toLowerCase();
+      const pSibText = cleanText(prevSib.textContent);
+      if (pSibTag === 'label' && pSibText) {
+        add('hierarchy', 'following-sib-label', `//label[normalize-space()=${xpEsc(extractPhrase(pSibText, 50))}]/following-sibling::${tag}[1]`, 'xpath', 60);
+      } else if (pSibText && pSibText.length > 1 && pSibText.length < 60) {
+        add('hierarchy', 'following-sibling', `//${pSibTag}[normalize-space()=${xpEsc(pSibText)}]/following-sibling::${tag}[1]`, 'xpath', 60);
+      }
+    }
+
+    // ── 18. Preceding-sibling (PRD score 55) ──────────────────────
+    const nextSib = el.nextElementSibling;
+    if (nextSib) {
+      const nSibTag = nextSib.tagName.toLowerCase();
+      const nSibText = cleanText(nextSib.textContent);
+      if (nSibText && nSibText.length > 1 && nSibText.length < 60) {
+        add('hierarchy', 'preceding-sibling', `//${nSibTag}[normalize-space()=${xpEsc(nSibText)}]/preceding-sibling::${tag}[1]`, 'xpath', 55);
+      }
+    }
+
+    // ── 19. AND combos (PRD scores 55–72) ─────────────────────────
+    if (role && cleaned && cleaned.length > 1 && cleaned.length <= 80) {
+      add('logical', 'role+text', `//*[@role="${role}" and contains(normalize-space(),${xpEsc(extractPhrase(cleaned, 50))})]`, 'xpath', 72);
+    }
+    if (staticClasses.length > 0 && cleaned && cleaned.length > 1) {
+      const cls = staticClasses[0];
+      add('logical', 'class+text', `//${tag}[contains(@class,${xpEsc(cls)}) and contains(normalize-space(),${xpEsc(extractPhrase(cleaned, 50))})]`, 'xpath', 63);
+    }
+    if (dynamicClasses.length > 0 && cleaned && cleaned.length > 1) {
+      const dc = dynamicClasses[0];
+      add('logical', 'dynclass+text', `//${tag}[contains(@class,${xpEsc(dc)}) and contains(normalize-space(),${xpEsc(extractPhrase(cleaned, 50))})]`, 'xpath', 55,
+        { warning: 'Dual-anchor: if class changes, text still matches; if text changes, class still matches' });
+    }
+
+    // ── 20. ID starts-with (PRD score 42) ─────────────────────────
+    if (id && !isStableId(id) && id.length > 5) {
+      // Find stable prefix (before digits or hashes)
+      const m = id.match(/^([a-zA-Z_-]{3,})/);
+      if (m) {
+        add('id', 'id-starts-with', `//${tag}[starts-with(@id,${xpEsc(m[1])})]`, 'xpath', 42,
+          { warning: 'Partial ID prefix — verify stability' });
+      }
+    }
+
+    // ── 21. Anchored CSS path (PRD score 30–82) ───────────────────
+    {
+      const chain = [];
+      let cur = el, depth = 0, anchorScore = 30;
+      while (cur && cur !== document.body && cur !== document.documentElement && depth < 10) {
+        const ct = cur.tagName.toLowerCase();
+        const ci = nthIndex(cur);
+        let seg = `${ct}:nth-child(${ci})`;
+        // Check for anchor
+        const cTestAttr = testAttrs.find(a => cur.getAttribute(a));
+        if (cTestAttr) { seg = `[${cTestAttr}="${cur.getAttribute(cTestAttr)}"]`; anchorScore = 82; chain.unshift(seg); break; }
+        if (cur.id && isStableId(cur.id)) { seg = `#${cssEsc(cur.id)}`; anchorScore = 78; chain.unshift(seg); break; }
+        if (cur.getAttribute('aria-label')) { seg = `[aria-label="${cur.getAttribute('aria-label')}"]`; anchorScore = 75; chain.unshift(seg); break; }
+        chain.unshift(seg);
+        // Check if unique already
+        const candidate = chain.join(' > ');
+        if (cssCount(candidate) === 1) { anchorScore = Math.max(anchorScore, 50); break; }
+        cur = cur.parentElement;
+        depth++;
+      }
+      if (chain.length > 0) {
+        const cssPath = chain.join(' > ');
+        add('css', 'css-path', cssPath, 'css', anchorScore);
+      }
+    }
+
+    // ── 22. Relative XPath with optimization (PRD score 44–83) ────
+    {
+      // Build full relative path using SelectorsHub attr priority
+      const attrPriority = ['placeholder', 'title', 'value', 'name', 'aria-label', 'alt', 'for', 'data-label', 'role', 'type'];
+      let relXp = absoluteXpath(el);
+      let relScore = 44;
+      // Try to optimize
+      const optimized = optimizeXpath(relXp);
+      if (optimized !== relXp) {
+        relXp = optimized;
+        relScore = 65;
+      }
+      // Try attribute-based relative
+      for (const attr of attrPriority) {
+        const v = el.getAttribute(attr);
+        if (v && !isAttrDynamic(v)) {
+          const candidate = `//${tag}[@${attr}=${xpEsc(v)}]`;
+          if (xpCount(candidate) === 1) { relXp = candidate; relScore = 83; break; }
+        }
+      }
+      add('xpath', 'relative-xpath', relXp, 'xpath', relScore);
+    }
+
+    // ── 23. Position-based XPath (PRD score 20) ───────────────────
+    {
+      const tagCount = cssCount(tag);
+      if (tagCount > 0) {
+        const els = document.querySelectorAll(tag);
+        let posIdx = -1;
+        for (let i = 0; i < els.length; i++) { if (els[i] === el) { posIdx = i + 1; break; } }
+        if (posIdx > 0) add('position', 'position-xpath', `(//${tag})[${posIdx}]`, 'xpath', 20);
+      }
+    }
+
+    // ── 24. Absolute XPath (PRD score 8) ──────────────────────────
+    add('absolute', 'absolute-xpath', absoluteXpath(el), 'xpath', 8);
+
+    // ── Sort (PRD §5.6) ───────────────────────────────────────────
+    locators.sort((a, b) => {
+      if (a.category === 'absolute' && b.category !== 'absolute') return 1;
+      if (b.category === 'absolute' && a.category !== 'absolute') return -1;
+      if (a.category === 'position' && b.category !== 'position' && b.category !== 'absolute') return 1;
+      if (b.category === 'position' && a.category !== 'position' && a.category !== 'absolute') return -1;
+      return b.score - a.score;
+    });
+
+    // ── Tier assignment (PRD §6.3: ≥65 Stable, 30–64 Moderate, <30 Fragile) ──
+    for (const loc of locators) {
+      if (loc.score >= 65) loc.tier = 'stable';
+      else if (loc.score >= 30) loc.tier = 'moderate';
+      else loc.tier = 'fragile';
+    }
+
+    // ── Metadata ──────────────────────────────────────────────────
+    const stableClassList = staticClasses;
+    const dynamicClassList = dynamicClasses;
+    const tagCount = cssCount(tag);
+
     return {
-      tag,
-      id: id || null,
-      idStable,
+      tag, id: id || null, name: name || null,
+      classes: classList, stableClasses: stableClassList, dynamicClasses: dynamicClassList,
       attributes: attrs,
-      classes: Array.from(el.classList || []),
-      classInfo: { stable, dynamic },
-      textPreview,
-      fullTextPreview,
+      role: role || null,
+      ariaLabel: ariaLabel || null,
+      textContent: cleaned,
+      textPreview: extractPhrase(rawText, 200),
+      linkText: tag === 'a' ? cleaned : null,
       rect: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) },
-      childCount: el.children.length,
-      computedStyles: pickStyles(getComputedStyle(el)),
-      referenceCounts: {
-        id: id ? countCss(`#${cssEsc(id)}`) : 0,
-        class: stable[0] ? countCss(`.${cssEsc(stable[0])}`) : 0,
-        tag: countCss(tag),
-        name: name ? countCss(`[name="${name.replace(/"/g, '\\"')}"]`) : 0,
-        ariaLabel: attrs['aria-label'] ? countCss(`[aria-label="${attrs['aria-label'].replace(/"/g, '\\"')}"]`) : 0,
-        linkText: tag === 'a' && textPreview ? countXPath(`//a[normalize-space(.)=${xpEsc(textPreview)}]`) : 0,
-        cssPath: cssPath ? countCss(cssPath) : 0,
-        xpath: relativeXPath ? countXPath(relativeXPath) : 0
+      computed: {
+        display: cs.display, visibility: cs.visibility, cursor: cs.cursor,
+        pointerEvents: cs.pointerEvents, fontSize: cs.fontSize, fontWeight: cs.fontWeight
       },
+      tagCount, childCount: el.children.length,
       locators
     };
   }
 
-  function pickStyles(style) {
-    return {
-      display: style.display,
-      visibility: style.visibility,
-      cursor: style.cursor,
-      'pointer-events': style.pointerEvents,
-      'font-size': style.fontSize,
-      'font-weight': style.fontWeight
-    };
-  }
-
+  // ═══════════════════════════════════════════════════════════════
+  //  OVERLAY
+  // ═══════════════════════════════════════════════════════════════
   function ensureOverlay() {
     if (overlayEl) return;
-    overlayEl = document.createElement('div');
-    overlayEl.id = OVR_ID;
-    tagEl = document.createElement('div');
-    tagEl.id = TAG_ID;
+    overlayEl = document.createElement('div'); overlayEl.id = OVR_ID;
+    tagEl = document.createElement('div'); tagEl.id = TAG_ID;
     overlayEl.appendChild(tagEl);
     document.documentElement.appendChild(overlayEl);
   }
-  function showOverlay(el, color = '#6366f1', bg = 'rgba(99,102,241,0.07)') {
+
+  function showOverlay(el) {
     ensureOverlay();
     const r = el.getBoundingClientRect();
     Object.assign(overlayEl.style, {
-      position: 'fixed', top: `${r.top}px`, left: `${r.left}px`, width: `${r.width}px`, height: `${r.height}px`, display: 'block', pointerEvents: 'none', zIndex: '2147483646', outline: `2px solid ${color}`, background: bg, boxSizing: 'border-box'
+      position:'fixed', top:r.top+'px', left:r.left+'px', width:r.width+'px', height:r.height+'px',
+      display:'block', pointerEvents:'none', zIndex:'2147483646',
+      outline:'2px solid #6366f1', background:'rgba(99,102,241,0.07)',
+      boxSizing:'border-box', transition:'top .08s,left .08s,width .08s,height .08s'
     });
-    tagEl.textContent = `${el.tagName.toLowerCase()} • ${Math.round(r.width)}×${Math.round(r.height)}`;
+    const cls = Array.from(el.classList||[]).slice(0,2).join('.');
+    tagEl.textContent = el.tagName.toLowerCase() + (el.id ? '#'+el.id.slice(0,20) : '') + (cls ? '.'+cls.slice(0,30) : '');
     Object.assign(tagEl.style, {
-      position: 'absolute', bottom: '100%', left: '0', background: color, color: '#fff', fontSize: '10px', fontFamily: 'monospace', padding: '2px 6px', borderRadius: '4px 4px 0 0', whiteSpace: 'nowrap'
+      position:'absolute', bottom:'100%', left:'0', background:'#6366f1', color:'#fff',
+      fontSize:'10px', fontFamily:'monospace', padding:'2px 6px', borderRadius:'3px 3px 0 0',
+      whiteSpace:'nowrap', maxWidth:'300px', overflow:'hidden', textOverflow:'ellipsis'
     });
   }
+
+  function flashGreen() {
+    if (!overlayEl) return;
+    overlayEl.style.outline = '2px solid #10b981'; overlayEl.style.background = 'rgba(16,185,129,0.12)';
+    setTimeout(() => { if (overlayEl) { overlayEl.style.outline = '2px solid #6366f1'; overlayEl.style.background = 'rgba(99,102,241,0.07)'; } }, 400);
+  }
+
   function hideOverlay() { if (overlayEl) overlayEl.style.display = 'none'; }
 
-  function clearEffects() {
-    document.querySelectorAll(`.${FLASH_CLASS}, .${HIGHLIGHT_CLASS}`).forEach(el => {
-      el.classList.remove(FLASH_CLASS, HIGHLIGHT_CLASS);
-      if (el.dataset[SAVED_OUTLINE] !== undefined) {
-        el.style.outline = el.dataset[SAVED_OUTLINE];
-        delete el.dataset[SAVED_OUTLINE];
-      }
-      if (el.dataset[SAVED_Z] !== undefined) {
-        el.style.zIndex = el.dataset[SAVED_Z];
-        delete el.dataset[SAVED_Z];
-      }
+  // ═══════════════════════════════════════════════════════════════
+  //  PRD §7 — FLASH & HIGHLIGHT MODES
+  // ═══════════════════════════════════════════════════════════════
+  let activeMode = null; // 'flash' | 'highlight'
+  let activeEls = [];
+
+  function clearAllModes() {
+    // Clear flash
+    document.querySelectorAll('.' + FLASH_CLS).forEach(el => {
+      el.classList.remove(FLASH_CLS);
+      if (el.dataset.ll5Prev !== undefined) { el.style.outline = el.dataset.ll5Prev; delete el.dataset.ll5Prev; }
+      el.style.zIndex = '';
     });
-    document.querySelectorAll(`.${DIM_CLASS}`).forEach(el => el.classList.remove(DIM_CLASS));
-    cycledMatches = [];
-    cycleIndex = 0;
+    // Clear highlight
+    document.querySelectorAll('.' + DIM_CLS).forEach(el => {
+      el.classList.remove(DIM_CLS);
+      el.style.opacity = ''; el.style.transition = '';
+    });
+    document.querySelectorAll('.' + HL_CLS).forEach(el => {
+      el.classList.remove(HL_CLS);
+      if (el.dataset.ll5Prev !== undefined) { el.style.outline = el.dataset.ll5Prev; delete el.dataset.ll5Prev; }
+      el.style.boxShadow = ''; el.style.zIndex = ''; el.style.opacity = '';
+    });
+    activeMode = null;
+    activeEls = [];
   }
-  function applyFlash(nodes) {
-    clearEffects();
-    nodes.forEach(el => {
-      el.dataset[SAVED_OUTLINE] = el.style.outline || '';
-      el.dataset[SAVED_Z] = el.style.zIndex || '';
-      el.classList.add(FLASH_CLASS);
+
+  /* PRD §7.1 — Flash Mode: amber pulsing outline */
+  function flashElements(els) {
+    clearAllModes();
+    activeMode = 'flash';
+    activeEls = els;
+    for (const el of els) {
+      el.dataset.ll5Prev = el.style.outline || '';
+      el.classList.add(FLASH_CLS);
+      el.style.outline = '2px solid #f59e0b';
+      el.style.outlineOffset = '1px';
       el.style.zIndex = '2147483640';
-    });
-  }
-  function applyHighlight(nodes) {
-    clearEffects();
-    const protectedSet = new Set();
-    nodes.forEach(node => {
-      let cur = node;
-      while (cur && cur.nodeType === 1) { protectedSet.add(cur); cur = cur.parentElement; }
-      node.querySelectorAll('*').forEach(child => protectedSet.add(child));
-    });
-    document.body.querySelectorAll('*').forEach(el => {
-      if (!protectedSet.has(el)) el.classList.add(DIM_CLASS);
-    });
-    nodes.forEach(el => {
-      el.dataset[SAVED_OUTLINE] = el.style.outline || '';
-      el.dataset[SAVED_Z] = el.style.zIndex || '';
-      el.classList.add(HIGHLIGHT_CLASS);
-      el.style.zIndex = '2147483642';
-    });
-  }
-  function resolveMatches(selector, selectorType) {
-    return selectorType === 'xpath' ? safeXPathAll(selector) : safeQueryAll(selector);
-  }
-  function flashSelector(selector, selectorType, mode = 'flash') {
-    const matches = resolveMatches(selector, selectorType).slice(0, 50);
-    if (!matches.length) {
-      clearEffects();
-      return;
     }
-    cycledMatches = matches;
-    cycleIndex = 0;
-    if (mode === 'highlight') applyHighlight(matches);
-    else applyFlash(matches);
-    matches[0].scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+    if (els[0]) els[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
-  function cycleMatch(selector, selectorType, direction = 'next') {
-    const matches = resolveMatches(selector, selectorType);
-    if (!matches.length) return;
-    cycledMatches = matches;
-    cycleIndex = direction === 'prev' ? (cycleIndex - 1 + matches.length) % matches.length : (cycleIndex + 1) % matches.length;
-    applyHighlight([matches[cycleIndex]]);
-    matches[cycleIndex].scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+
+  /* PRD §7.2 — Highlight Mode: dim everything, violet glow on target */
+  function highlightElements(els) {
+    clearAllModes();
+    activeMode = 'highlight';
+    activeEls = els;
+    const targetSet = new Set(els);
+    // Collect ancestors and descendants to exclude from dimming
+    const excluded = new Set();
+    for (const el of els) {
+      excluded.add(el);
+      let anc = el.parentElement;
+      while (anc) { excluded.add(anc); anc = anc.parentElement; }
+      el.querySelectorAll('*').forEach(d => excluded.add(d));
+    }
+    // Dim all body children
+    document.querySelectorAll('body *').forEach(el => {
+      if (el === overlayEl || el === tagEl) return;
+      if (excluded.has(el)) return;
+      el.classList.add(DIM_CLS);
+      el.style.opacity = '0.2';
+      el.style.transition = 'opacity 0.15s';
+    });
+    // Highlight targets
+    for (const el of els) {
+      el.dataset.ll5Prev = el.style.outline || '';
+      el.classList.add(HL_CLS);
+      el.style.opacity = '1';
+      el.style.outline = '2px solid #6366f1';
+      el.style.outlineOffset = '2px';
+      el.style.boxShadow = '0 0 0 4px rgba(99,102,241,0.25)';
+      el.style.zIndex = '2147483642';
+    }
+    if (els[0]) els[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  PICKER (PRD §4.1 — composedPath)
+  // ═══════════════════════════════════════════════════════════════
+  const state = { picking: false, passive: false, lastTarget: null };
+
+  function resolveTarget(e) {
+    // PRD §4.1: composedPath()[0] for shadow DOM
+    const path = e.composedPath ? e.composedPath() : [];
+    let t = path[0] || e.target;
+    if (t === overlayEl || t === tagEl) t = state.lastTarget || document.elementFromPoint(e.clientX, e.clientY);
+    return (t && t !== overlayEl && t !== tagEl) ? t : null;
   }
 
   function onPickMove(e) {
-    const target = e.composedPath?.()[0] || e.target;
-    if (!target || target === overlayEl || target === tagEl || target.nodeType !== 1) return;
-    state.lastTarget = target;
-    showOverlay(target);
+    const t = resolveTarget(e);
+    if (!t) return;
+    state.lastTarget = t;
+    showOverlay(t);
   }
+
   function onPickClick(e) {
-    e.preventDefault();
-    e.stopImmediatePropagation();
-    e.stopPropagation();
-    const target = e.composedPath?.()[0] || e.target;
-    if (!target || target === overlayEl || target === tagEl || target.nodeType !== 1) return;
-    showOverlay(target, '#10b981', 'rgba(16,185,129,.10)');
-    setTimeout(hideOverlay, 600);
+    e.preventDefault(); e.stopImmediatePropagation(); e.stopPropagation();
+    const t = resolveTarget(e);
+    if (!t) return;
+    flashGreen();
     stopPick();
-    chrome.runtime.sendMessage({ type: 'locatorsGenerated', payload: generateLocators(target) });
+    chrome.runtime.sendMessage({ type: 'locatorsGenerated', payload: generateLocators(t) });
   }
+
   function onPickKey(e) {
-    if (e.key === 'Escape') {
-      stopPick();
-      chrome.runtime.sendMessage({ type: 'pickingCancelled' });
-    }
+    if (e.key === 'Escape') { stopPick(); chrome.runtime.sendMessage({ type: 'pickingCancelled' }); }
   }
+
   function startPick() {
     state.picking = true;
-    document.documentElement.style.cursor = 'crosshair';
+    ensureOverlay(); overlayEl.style.display = '';
     document.addEventListener('mousemove', onPickMove, true);
     document.addEventListener('click', onPickClick, true);
     document.addEventListener('keydown', onPickKey, true);
+    document.documentElement.style.cursor = 'crosshair';
   }
+
   function stopPick() {
-    state.picking = false;
-    document.documentElement.style.cursor = '';
-    hideOverlay();
+    state.picking = false; hideOverlay();
     document.removeEventListener('mousemove', onPickMove, true);
     document.removeEventListener('click', onPickClick, true);
     document.removeEventListener('keydown', onPickKey, true);
+    document.documentElement.style.cursor = '';
   }
+
+  // ═══════════════════════════════════════════════════════════════
+  //  PASSIVE MODE (PRD §4.2)
+  // ═══════════════════════════════════════════════════════════════
   function onPassiveClick(e) {
     if (!state.passive || state.picking) return;
-    const target = e.composedPath?.()[0] || e.target;
-    if (!target || target === overlayEl || target === tagEl || target.nodeType !== 1) return;
-    showOverlay(target, '#10b981', 'rgba(16,185,129,.10)');
-    setTimeout(hideOverlay, 600);
-    chrome.runtime.sendMessage({ type: 'locatorsGenerated', payload: generateLocators(target) });
+    const t = resolveTarget(e);
+    if (!t) return;
+    // Green flash 600ms
+    ensureOverlay();
+    const r = t.getBoundingClientRect();
+    Object.assign(overlayEl.style, {
+      position:'fixed', top:r.top+'px', left:r.left+'px', width:r.width+'px', height:r.height+'px',
+      display:'block', pointerEvents:'none', zIndex:'2147483646',
+      outline:'2px solid #10b981', background:'rgba(16,185,129,0.08)', boxSizing:'border-box'
+    });
+    tagEl.textContent = t.tagName.toLowerCase();
+    Object.assign(tagEl.style, { position:'absolute', bottom:'100%', left:'0', background:'#10b981', color:'#fff', fontSize:'10px', fontFamily:'monospace', padding:'2px 6px', borderRadius:'3px 3px 0 0', whiteSpace:'nowrap' });
+    setTimeout(() => hideOverlay(), 600);
+    chrome.runtime.sendMessage({ type: 'locatorsGenerated', payload: generateLocators(t) });
   }
   document.addEventListener('click', onPassiveClick, true);
 
-  function validateSelector(selector, selectorType) {
-    try {
-      const nodes = resolveMatches(selector, selectorType);
-      return {
-        selector,
-        selectorType,
-        count: nodes.length,
-        error: null,
-        preview: nodes.slice(0, 5).map(node => ({ tag: node.tagName.toLowerCase(), text: extractPhrase(node.textContent || node.getAttribute('aria-label') || node.id || '', 80) || '—' }))
-      };
-    } catch (err) {
-      return { selector, selectorType, count: 0, error: err.message, preview: [] };
-    }
-  }
-
-  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  // ═══════════════════════════════════════════════════════════════
+  //  MESSAGE HANDLER
+  // ═══════════════════════════════════════════════════════════════
+  chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
     switch (msg.type) {
       case 'ping': sendResponse({ pong: true }); break;
       case 'startPicking': startPick(); sendResponse({ ok: true }); break;
       case 'stopPicking': stopPick(); sendResponse({ ok: true }); break;
       case 'setPassive': state.passive = !!msg.enabled; sendResponse({ ok: true }); break;
-      case 'flashLocator': flashSelector(msg.selector, msg.selectorType, msg.mode || 'flash'); sendResponse({ ok: true }); break;
-      case 'clearFlash': clearEffects(); sendResponse({ ok: true }); break;
-      case 'cycleMatch': cycleMatch(msg.selector, msg.selectorType, msg.direction); sendResponse({ ok: true }); break;
-      case 'validateSelector': sendResponse(validateSelector(msg.selector, msg.selectorType)); break;
+      case 'flashLocator': {
+        const els = resolveEls(msg.selector, msg.selectorType);
+        flashElements(els);
+        sendResponse({ ok: true, count: els.length });
+        break;
+      }
+      case 'highlightLocator': {
+        const els = resolveEls(msg.selector, msg.selectorType);
+        highlightElements(els);
+        sendResponse({ ok: true, count: els.length });
+        break;
+      }
+      case 'clearFlash': clearAllModes(); sendResponse({ ok: true }); break;
+      case 'navigateMatch': {
+        const els = resolveEls(msg.selector, msg.selectorType);
+        const idx = Math.max(0, Math.min(msg.index || 0, els.length - 1));
+        if (els[idx]) els[idx].scrollIntoView({ behavior: 'smooth', block: 'center' });
+        sendResponse({ ok: true, total: els.length, index: idx });
+        break;
+      }
+      case 'validateSelector': {
+        let count = -1, error = null, previews = [];
+        try {
+          const els = resolveEls(msg.selector, msg.selectorType, 5);
+          count = msg.selectorType === 'xpath' ? xpCount(msg.selector) : cssCount(msg.selector);
+          previews = els.slice(0, 5).map(el => ({
+            tag: el.tagName.toLowerCase(),
+            text: (el.textContent || '').trim().slice(0, 60)
+          }));
+        } catch (e) { error = e.message; }
+        sendResponse({ selector: msg.selector, selectorType: msg.selectorType, count, error, previews });
+        break;
+      }
       default: sendResponse({ ok: false });
     }
     return true;
   });
+
 })();
