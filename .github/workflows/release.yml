@@ -10,13 +10,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Read version
         id: meta
         run: |
           echo "version=$(jq -r .version manifest.json)" >> "$GITHUB_OUTPUT"
           echo "name=$(jq -r .name manifest.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ -n "${{ github.ref_name }}" ] && [[ "${{ github.ref_name }}" == v* ]]; then
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            TAG="v${{ steps.meta.outputs.version }}"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            git config user.name "github-actions"
+            git config user.email "github-actions@github.com"
+            git tag "$TAG" || true
+            git push origin "$TAG" || true
+          fi
+
       - name: Generate signing key
         run: openssl genrsa -out key.pem 2048
+
       - name: Build packages
         id: build
         run: |
@@ -34,10 +51,12 @@ jobs:
           echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
           echo "crx=$CRX" >> "$GITHUB_OUTPUT"
           ls -lh "$ZIP" "$CRX"
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "${{ steps.meta.outputs.name }} v${{ steps.meta.outputs.version }}"
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: "${{ steps.meta.outputs.name }} ${{ steps.tag.outputs.tag }}"
           body: |
             ## Installation
             1. Download the `.zip` below → unzip → `chrome://extensions` → Developer mode → Load unpacked
@@ -45,6 +64,7 @@ jobs:
           files: |
             ${{ steps.build.outputs.zip }}
             ${{ steps.build.outputs.crx }}
+
       - name: Cleanup
         if: always()
         run: rm -f key.pem pub.der sig.der
