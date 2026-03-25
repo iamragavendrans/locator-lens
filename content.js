@@ -53,6 +53,21 @@
     return false;
   }
 
+  /** Check if an XPath is index-only (every segment is tag[n] with no real predicates) */
+  function isIndexOnlyXpath(xpath) {
+    // Strip leading // or /
+    const cleaned = xpath.replace(/^\/+/, '');
+    const segments = cleaned.split('/').filter(Boolean);
+    // If every segment matches tag[number] or tag pattern, it's index-only
+    return segments.every(s => /^[a-z][a-z0-9]*(\[\d+\])?$/i.test(s));
+  }
+
+  /** Count positional indices [n] in an xpath */
+  function countXpathIndices(xpath) {
+    const m = xpath.match(/\[\d+\]/g);
+    return m ? m.length : 0;
+  }
+
   function xpEsc(str) {
     if (!str.includes("'")) return `'${str}'`;
     if (!str.includes('"')) return `"${str}"`;
@@ -167,18 +182,19 @@
   //  PRD §5.4 — XPath Optimization (SelectorsHub optimizeXpath port)
   // ═══════════════════════════════════════════════════════════════
   function optimizeXpath(fullXpath) {
-    // Find deepest predicate with meaningful anchor (length>3)
-    const segments = fullXpath.replace(/^\/\//, '').split('/');
+    const segments = fullXpath.replace(/^\/+/, '').split('/').filter(Boolean);
+    // First pass: find deepest segment with a meaningful predicate (not just [n])
     for (let i = segments.length - 1; i >= 0; i--) {
-      if (/\[.{4,}\]/.test(segments[i])) {
+      // Must have a predicate that's NOT just a number index
+      if (/\[[^\d][^\]]*\]/.test(segments[i]) || /\[.{4,}\]/.test(segments[i]) && !/^\w+\[\d+\]$/.test(segments[i])) {
         const candidate = '//' + segments.slice(i).join('/');
         if (xpCount(candidate) === 1) return candidate;
       }
     }
-    // Fallback: strip leading segments one at a time
+    // Second pass: strip leading segments, but only accept if NOT index-only
     for (let i = 1; i < segments.length; i++) {
       const candidate = '//' + segments.slice(i).join('/');
-      if (xpCount(candidate) === 1) return candidate;
+      if (xpCount(candidate) === 1 && !isIndexOnlyXpath(candidate)) return candidate;
     }
     return fullXpath;
   }
@@ -511,25 +527,36 @@
 
     // ── 22. Relative XPath with optimization (PRD score 44–83) ────
     {
-      // Build full relative path using SelectorsHub attr priority
       const attrPriority = ['placeholder', 'title', 'value', 'name', 'aria-label', 'alt', 'for', 'data-label', 'role', 'type'];
       let relXp = absoluteXpath(el);
-      let relScore = 44;
-      // Try to optimize
-      const optimized = optimizeXpath(relXp);
-      if (optimized !== relXp) {
-        relXp = optimized;
-        relScore = 65;
-      }
-      // Try attribute-based relative
+      let relScore = 8; // Start at absolute score
+      // Try attribute-based relative FIRST (best outcome)
+      let foundAttr = false;
       for (const attr of attrPriority) {
         const v = el.getAttribute(attr);
         if (v && !isAttrDynamic(v)) {
           const candidate = `//${tag}[@${attr}=${xpEsc(v)}]`;
-          if (xpCount(candidate) === 1) { relXp = candidate; relScore = 83; break; }
+          if (xpCount(candidate) === 1) { relXp = candidate; relScore = 83; foundAttr = true; break; }
         }
       }
-      add('xpath', 'relative-xpath', relXp, 'xpath', relScore);
+      // If no attribute match, try optimize
+      if (!foundAttr) {
+        const optimized = optimizeXpath(relXp);
+        if (optimized !== relXp) {
+          relXp = optimized;
+          // Score based on whether it's still index-heavy
+          if (isIndexOnlyXpath(relXp)) {
+            const idxCount = countXpathIndices(relXp);
+            relScore = Math.max(12, 35 - (idxCount * 5)); // 3 indices = 20, 5+ = 12
+          } else {
+            relScore = 65;
+          }
+        }
+      }
+      // Only add if it's not the same as absolute
+      if (relXp !== absoluteXpath(el) || !foundAttr) {
+        add('xpath', 'relative-xpath', relXp, 'xpath', relScore);
+      }
     }
 
     // ── 23. Position-based XPath (PRD score 20) ───────────────────
@@ -576,12 +603,20 @@
       textContent: cleaned,
       textPreview: extractPhrase(rawText, 200),
       linkText: tag === 'a' ? cleaned : null,
-      rect: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) },
+      rect: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height), cx: Math.round(rect.x + rect.width / 2), cy: Math.round(rect.y + rect.height / 2) },
       computed: {
         display: cs.display, visibility: cs.visibility, cursor: cs.cursor,
-        pointerEvents: cs.pointerEvents, fontSize: cs.fontSize, fontWeight: cs.fontWeight
+        pointerEvents: cs.pointerEvents, fontSize: cs.fontSize, fontWeight: cs.fontWeight,
+        color: cs.color, backgroundColor: cs.backgroundColor,
+        opacity: cs.opacity, position: cs.position, zIndex: cs.zIndex,
+        overflow: cs.overflow,
+        disabled: el.disabled || false,
+        readOnly: el.readOnly || false,
+        tabIndex: el.tabIndex
       },
       tagCount, childCount: el.children.length,
+      shadowRoot: !!el.shadowRoot,
+      iframe: tag === 'iframe',
       locators
     };
   }
@@ -773,48 +808,91 @@
   document.addEventListener('click', onPassiveClick, true);
 
   // ═══════════════════════════════════════════════════════════════
+  //  LOCK MODE — block UI interaction on page (prevent clicks from
+  //  triggering dropdowns, modals, navigation etc.)
+  // ═══════════════════════════════════════════════════════════════
+  let lockMode = false;
+  const LOCK_EVENTS = ['click', 'mousedown', 'mouseup', 'keydown', 'keyup', 'keypress', 'submit', 'focus', 'change', 'input', 'contextmenu', 'dblclick', 'touchstart', 'touchend'];
+
+  function lockBlocker(e) {
+    // Allow our own overlay/tag clicks through
+    if (e.target === overlayEl || e.target === tagEl) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+  }
+
+  function enableLockMode() {
+    if (lockMode) return;
+    lockMode = true;
+    for (const evt of LOCK_EVENTS) {
+      document.addEventListener(evt, lockBlocker, true);
+    }
+    // Visual indicator
+    document.documentElement.style.setProperty('--ll5-lock', '1');
+  }
+
+  function disableLockMode() {
+    if (!lockMode) return;
+    lockMode = false;
+    for (const evt of LOCK_EVENTS) {
+      document.removeEventListener(evt, lockBlocker, true);
+    }
+    document.documentElement.style.removeProperty('--ll5-lock');
+  }
+
+  // ═══════════════════════════════════════════════════════════════
   //  MESSAGE HANDLER
   // ═══════════════════════════════════════════════════════════════
   chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
-    switch (msg.type) {
-      case 'ping': sendResponse({ pong: true }); break;
-      case 'startPicking': startPick(); sendResponse({ ok: true }); break;
-      case 'stopPicking': stopPick(); sendResponse({ ok: true }); break;
-      case 'setPassive': state.passive = !!msg.enabled; sendResponse({ ok: true }); break;
-      case 'flashLocator': {
-        const els = resolveEls(msg.selector, msg.selectorType);
-        flashElements(els);
-        sendResponse({ ok: true, count: els.length });
-        break;
+    try {
+      switch (msg.type) {
+        case 'ping': sendResponse({ pong: true }); break;
+        case 'startPicking': startPick(); sendResponse({ ok: true }); break;
+        case 'stopPicking': stopPick(); sendResponse({ ok: true }); break;
+        case 'setPassive': state.passive = !!msg.enabled; sendResponse({ ok: true }); break;
+        case 'setLock': {
+          if (msg.enabled) enableLockMode(); else disableLockMode();
+          sendResponse({ ok: true });
+          break;
+        }
+        case 'flashLocator': {
+          const els = resolveEls(msg.selector, msg.selectorType);
+          flashElements(els);
+          sendResponse({ ok: true, count: els.length });
+          break;
+        }
+        case 'highlightLocator': {
+          const els = resolveEls(msg.selector, msg.selectorType);
+          highlightElements(els);
+          sendResponse({ ok: true, count: els.length });
+          break;
+        }
+        case 'clearFlash': clearAllModes(); sendResponse({ ok: true }); break;
+        case 'navigateMatch': {
+          const els = resolveEls(msg.selector, msg.selectorType);
+          const idx = Math.max(0, Math.min(msg.index || 0, els.length - 1));
+          if (els[idx]) els[idx].scrollIntoView({ behavior: 'smooth', block: 'center' });
+          sendResponse({ ok: true, total: els.length, index: idx });
+          break;
+        }
+        case 'validateSelector': {
+          let count = -1, error = null, previews = [];
+          try {
+            const els = resolveEls(msg.selector, msg.selectorType, 5);
+            count = msg.selectorType === 'xpath' ? xpCount(msg.selector) : cssCount(msg.selector);
+            previews = els.slice(0, 5).map(el => ({
+              tag: el.tagName.toLowerCase(),
+              text: (el.textContent || '').trim().slice(0, 60)
+            }));
+          } catch (e) { error = e.message; }
+          sendResponse({ selector: msg.selector, selectorType: msg.selectorType, count, error, previews });
+          break;
+        }
+        default: sendResponse({ ok: false });
       }
-      case 'highlightLocator': {
-        const els = resolveEls(msg.selector, msg.selectorType);
-        highlightElements(els);
-        sendResponse({ ok: true, count: els.length });
-        break;
-      }
-      case 'clearFlash': clearAllModes(); sendResponse({ ok: true }); break;
-      case 'navigateMatch': {
-        const els = resolveEls(msg.selector, msg.selectorType);
-        const idx = Math.max(0, Math.min(msg.index || 0, els.length - 1));
-        if (els[idx]) els[idx].scrollIntoView({ behavior: 'smooth', block: 'center' });
-        sendResponse({ ok: true, total: els.length, index: idx });
-        break;
-      }
-      case 'validateSelector': {
-        let count = -1, error = null, previews = [];
-        try {
-          const els = resolveEls(msg.selector, msg.selectorType, 5);
-          count = msg.selectorType === 'xpath' ? xpCount(msg.selector) : cssCount(msg.selector);
-          previews = els.slice(0, 5).map(el => ({
-            tag: el.tagName.toLowerCase(),
-            text: (el.textContent || '').trim().slice(0, 60)
-          }));
-        } catch (e) { error = e.message; }
-        sendResponse({ selector: msg.selector, selectorType: msg.selectorType, count, error, previews });
-        break;
-      }
-      default: sendResponse({ ok: false });
+    } catch (err) {
+      sendResponse({ ok: false, error: err.message });
     }
     return true;
   });

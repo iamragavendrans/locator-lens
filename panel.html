@@ -3,8 +3,6 @@
 <head><meta charset="UTF-8"/><title>LocatorLens</title><link rel="stylesheet" href="panel.css"/></head>
 <body>
 <div id="app">
-
-  <!-- PRD §9 — Header with 4 pill buttons -->
   <header class="hdr">
     <div class="hdr-brand">
       <svg class="hdr-logo" width="20" height="20" viewBox="0 0 24 24" fill="none">
@@ -17,118 +15,79 @@
       <span class="hdr-title">LocatorLens</span>
     </div>
     <div class="hdr-btns">
-      <button id="btn-passive" class="pill" title="Auto-capture every click (PRD §4.2)">Passive</button>
-      <button id="btn-lock" class="pill" title="Freeze results (PRD §4.3)" disabled>Lock</button>
+      <button id="btn-passive" class="pill" title="Auto-capture clicks on bound page">Passive</button>
+      <button id="btn-lock" class="pill" title="Lock page interactions — prevents UI changes while inspecting" disabled>Lock</button>
       <button id="btn-stack" class="pill" title="Open Stack section">Stack <span id="stack-count">0</span></button>
-      <button id="btn-pick" class="pill pill-primary" title="Pick an element (PRD §4.1)">
+      <button id="btn-pick" class="pill pill-primary" title="Pick an element — binds to current tab">
         <svg width="11" height="11" viewBox="0 0 12 12" fill="none"><circle cx="6" cy="6" r="5" stroke="currentColor" stroke-width="1.5"/><line x1="6" y1="1" x2="6" y2="11" stroke="currentColor" stroke-width="1.5"/><line x1="1" y1="6" x2="11" y2="6" stroke="currentColor" stroke-width="1.5"/></svg>
-        Pick Element
+        +Pick
       </button>
     </div>
   </header>
-
-  <!-- Idle -->
+  <div id="tab-bar" class="tab-bar" style="display:none">
+    <span id="tab-url" class="tab-url"></span>
+    <button id="btn-unbind" class="tab-unbind" title="Release page binding">x</button>
+  </div>
   <section id="v-idle" class="v-state">
-    <svg width="44" height="44" viewBox="0 0 24 24" fill="none" opacity="0.25">
-      <circle cx="11" cy="11" r="8" stroke="currentColor" stroke-width="1.5"/>
-      <line x1="17" y1="17" x2="22" y2="22" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-    </svg>
+    <svg width="44" height="44" viewBox="0 0 24 24" fill="none" opacity="0.25"><circle cx="11" cy="11" r="8" stroke="currentColor" stroke-width="1.5"/><line x1="17" y1="17" x2="22" y2="22" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
     <p class="v-title">Ready to inspect</p>
-    <p class="v-sub">Click <strong>Pick Element</strong> to select, or enable <strong>Passive</strong> to capture clicks automatically.</p>
+    <p class="v-sub">Click <strong>+Pick</strong> to select, or enable <strong>Passive</strong> to capture clicks.</p>
   </section>
-
-  <!-- Picking -->
   <section id="v-picking" class="v-state" style="display:none">
     <div class="pick-ring"></div>
-    <p class="v-title">Picking active…</p>
+    <p class="v-title">Picking active...</p>
     <p class="v-sub">Click any element on the page. Press <kbd>Esc</kbd> to cancel.</p>
   </section>
-
-  <!-- Error -->
   <section id="v-error" class="v-state" style="display:none">
-    <p class="v-title v-err">⚠ Error</p>
+    <p class="v-title v-err">Warning</p>
     <p id="err-msg" class="v-sub"></p>
   </section>
-
-  <!-- ═══ Results — 5 collapsible sections (PRD §6) ═══ -->
   <div id="v-results" class="results" style="display:none">
-
-    <!-- Lock banner (PRD §4.3) -->
-    <div id="lock-banner" class="lock-banner" style="display:none">
-      <span>🔒 Panel locked — click <button id="btn-unlock" class="inline-btn">Unlock</button></span>
-    </div>
-
-    <!-- §6.1 Reference -->
-    <details id="sec-reference" class="sec" open>
-      <summary class="sec-hd">Reference</summary>
-      <div id="ref-grid" class="sec-bd ref-grid"></div>
-    </details>
-
-    <!-- §6.2 Properties -->
-    <details id="sec-properties" class="sec">
-      <summary class="sec-hd">Properties</summary>
-      <div id="props-body" class="sec-bd"></div>
-    </details>
-
-    <!-- §6.3 Locators -->
+    <details id="sec-reference" class="sec" open><summary class="sec-hd">Reference</summary><div id="ref-grid" class="sec-bd ref-grid"></div></details>
+    <details id="sec-properties" class="sec"><summary class="sec-hd">Properties</summary><div id="props-body" class="sec-bd"></div></details>
     <details id="sec-locators" class="sec" open>
-      <summary class="sec-hd">
-        Locators
-        <span id="tier-pills" class="tier-pills"></span>
-      </summary>
+      <summary class="sec-hd">Locators <span id="tier-pills" class="tier-pills"></span></summary>
       <div class="sec-bd loc-body">
-        <!-- Best card -->
         <div id="best-card" class="best-card" style="display:none"></div>
-        <!-- Tier: Stable -->
-        <div id="tier-stable-hd" class="tier-hd tier-stable-hd" style="display:none">Stable</div>
-        <div id="tier-stable"></div>
-        <!-- Tier: Moderate -->
-        <div id="tier-moderate-hd" class="tier-hd tier-moderate-hd" style="display:none">Moderate</div>
-        <div id="tier-moderate"></div>
-        <!-- Tier: Fragile -->
-        <div id="tier-fragile-hd" class="tier-hd tier-fragile-hd" style="display:none">Fragile</div>
-        <div id="tier-fragile"></div>
+        <div id="tier-stable-hd" class="tier-hd tier-stable-hd" style="display:none"></div><div id="tier-stable"></div>
+        <div id="tier-moderate-hd" class="tier-hd tier-moderate-hd" style="display:none"></div><div id="tier-moderate"></div>
+        <div id="tier-fragile-hd" class="tier-hd tier-fragile-hd" style="display:none"></div><div id="tier-fragile"></div>
       </div>
     </details>
-
-    <!-- §6.4 Stack -->
     <details id="sec-stack" class="sec">
       <summary class="sec-hd">Stack</summary>
       <div class="sec-bd">
-        <div class="stack-toolbar">
-          <button id="btn-add-stack" class="sm-btn">+ Add current</button>
-          <button id="btn-export-pom" class="sm-btn">Export POM</button>
-          <button id="btn-clear-stack" class="sm-btn">Clear</button>
-        </div>
+        <div class="stack-toolbar"><button id="btn-add-stack" class="sm-btn">+ Add current</button><button id="btn-export-pom" class="sm-btn">Export POM</button><button id="btn-clear-stack" class="sm-btn">Clear</button></div>
         <div id="stack-list" class="stack-list"></div>
         <div id="pom-picker" class="pom-picker" style="display:none">
-          <button class="pom-btn" data-fw="playwright">Playwright TS</button>
-          <button class="pom-btn" data-fw="selenium">Selenium Java</button>
-          <button class="pom-btn" data-fw="cypress">Cypress JS</button>
-          <button class="pom-btn" data-fw="wdio">WebdriverIO</button>
-          <button class="pom-btn" data-fw="puppeteer">Puppeteer</button>
-          <button class="pom-btn" data-fw="testcafe">TestCafe</button>
-          <button class="pom-btn" data-fw="raw">Raw JSON</button>
+          <button class="pom-btn" data-fw="playwright">Playwright TS</button><button class="pom-btn" data-fw="selenium">Selenium Java</button>
+          <button class="pom-btn" data-fw="cypress">Cypress JS</button><button class="pom-btn" data-fw="wdio">WebdriverIO</button>
+          <button class="pom-btn" data-fw="puppeteer">Puppeteer</button><button class="pom-btn" data-fw="testcafe">TestCafe</button><button class="pom-btn" data-fw="raw">Raw JSON</button>
         </div>
       </div>
     </details>
-
-    <!-- §6.5 Live Validator -->
     <details id="sec-validator" class="sec">
       <summary class="sec-hd">Live Validator</summary>
       <div class="sec-bd">
         <div class="val-row">
-          <select id="val-type" class="val-sel"><option value="css">CSS</option><option value="xpath">XPath</option></select>
-          <select id="val-mode" class="val-sel"><option value="flash">Flash</option><option value="highlight">Highlight</option></select>
-          <input id="val-input" class="val-input" placeholder="Enter selector…"/>
-          <button id="val-go" class="sm-btn">Test</button>
+          <span id="val-type-badge" class="val-type-badge">--</span>
+          <input id="val-input" class="val-input" placeholder="Enter CSS or XPath selector..."/>
+          <button id="val-highlight" class="sm-btn" title="Highlight">Highlight</button>
+          <button id="val-flash" class="sm-btn" title="Flash">Flash</button>
         </div>
         <div id="val-result" class="val-result"></div>
         <div id="val-preview" class="val-preview"></div>
-        <button id="val-flash" class="sm-btn" style="display:none">Flash</button>
       </div>
     </details>
-
+  </div>
+</div>
+<div id="color-modal" class="color-modal" style="display:none">
+  <div class="color-modal-backdrop"></div>
+  <div class="color-modal-content">
+    <div id="color-modal-swatch" class="color-modal-swatch"></div>
+    <div id="color-modal-value" class="color-modal-value"></div>
+    <button id="color-modal-copy" class="sm-btn">Copy</button>
+    <button id="color-modal-close" class="color-modal-close">x</button>
   </div>
 </div>
 <script src="panel.js"></script>
