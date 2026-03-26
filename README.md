@@ -1,4 +1,4 @@
-# LocatorLens
+[[# LocatorLens
 
 **Instant locator generation and ranking for every web element.**
 
@@ -91,3 +91,4 @@ build_crx3.py       CRX3 packager (CI only)
 ## License
 
 [MIT](LICENSE)
+](https://github.com/iamragavendrans/locator-lens)](https://github.com/iamragavendrans/locator-lens)
