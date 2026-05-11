@@ -193,9 +193,43 @@ body {
 }
 .hdr-title { font-size: 13px; font-weight: 600; color: var(--text); }
 
+.hdr-btns { display: flex; gap: 6px; align-items: center; }
 .pill {
-  background: rgba(255, 255, 255, 0.03);
-  backdrop-filter: blur(4px);
+  background: var(--srf2);
+  border: 1px solid var(--bdr);
+  color: var(--text2);
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.pill:hover { border-color: var(--accent); color: var(--text); background: var(--srf); }
+.pill.active, .pill.on-passive, .pill.on-lock {
+  background: rgba(99, 102, 241, 0.1);
+  border-color: var(--accent);
+  color: var(--accent-h);
+}
+.pill-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.pill-primary:hover {
+  background: var(--accent-h);
+  border-color: var(--accent-h);
+  box-shadow: 0 0 10px rgba(99, 102, 241, 0.3);
+}
+#stack-count {
+  background: var(--accent);
+  color: #fff;
+  padding: 0 4px;
+  border-radius: 4px;
+  font-size: 8px;
 }
 
 .loc-sel {

@@ -926,6 +926,9 @@
     chrome.runtime.sendMessage({ type: 'locatorsGenerated', payload: generateLocators(t) });
   }
   document.addEventListener('click', onPassiveClick, true);
+  document.addEventListener('contextmenu', (e) => {
+    state.lastTarget = resolveTarget(e);
+  }, true);
 
   // ═══════════════════════════════════════════════════════════════
   //  LOCK MODE — block UI interaction on page (prevent clicks from
