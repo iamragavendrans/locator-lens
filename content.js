@@ -255,7 +255,6 @@
       let count = -1;
       if (selectorType === 'xpath') count = xpCount(selector);
       else if (selectorType === 'css') count = cssCount(selector);
-      else if (selectorType === 'pw') count = 1; // Playwright getBy are assume-unique for now
       
       let score = baseScore;
       if (count === 0) score = 0;
@@ -612,41 +611,7 @@
       }
     }
 
-    // ── 23. Playwright getBy... (PRD score 85–98) ────────────────
-    {
-      const pwAdd = (label, selector, score) => {
-        // In a real Playwright scenario, we'd check if this is unique across the whole page.
-        // For simplicity, we assume uniqueness or provide .first() / .nth() if we can detect it.
-        add('playwright', label, selector, 'pw', score);
-      };
-
-      if (ariaLabel) pwAdd('getByLabel', `getByLabel('${ariaLabel}')`, 92);
-      if (role) {
-        let opts = '';
-        if (ariaLabel) opts = `, { name: '${ariaLabel}' }`;
-        else if (placeholder) opts = `, { name: '${placeholder}' }`;
-        pwAdd('getByRole', `getByRole('${role}'${opts})`, 90);
-      }
-      if (placeholder) pwAdd('getByPlaceholder', `getByPlaceholder('${placeholder}')`, 88);
-      if (alt) pwAdd('getByAltText', `getByAltText('${alt}')`, 88);
-      if (title) pwAdd('getByTitle', `getByTitle('${title}')`, 85);
-      if (testAttrs.some(a => el.getAttribute(a))) {
-        const ta = testAttrs.find(a => el.getAttribute(a));
-        pwAdd('getByTestId', `getByTestId('${el.getAttribute(ta)}')`, 98);
-      }
-      if (cleaned && cleaned.length > 1 && cleaned.length < 50) {
-        pwAdd('getByText', `getByText('${cleaned}')`, 85);
-      }
-      
-      // Smart Nth for Playwright
-      const tagCount = cssCount(tag);
-      if (tagCount > 1) {
-        const els = resolveEls(tag, 'css', 100);
-        let posIdx = -1;
-        for (let i = 0; i < els.length; i++) { if (els[i] === el) { posIdx = i; break; } }
-        if (posIdx >= 0) pwAdd('nth-locator', `locator('${tag}').nth(${posIdx})`, 25);
-      }
-    }
+    // Playwright getBy... removed to prioritize DevTools-compatible CSS/XPath
 
     // ── 24. Smart Sibling Anchoring (PRD score 55–65) ─────────────
     {

@@ -156,16 +156,26 @@ const countIdx = (xpath) => {
 };
 
 const dynamicQ = (loc) => {
+  let q = loc.score || 0;
   const s = loc.selector;
-  let q = loc.score;
-  const ic = countIdx(s);
-  if (s.startsWith('/html') || isIndexOnlyXp(s)) { q -= 60; return q; }
-  if (ic >= 4) q -= 50; else if (ic === 3) q -= 30; else if (ic === 2) q -= 15; else if (ic === 1) q -= 5;
-  if (/contains\s*\(/.test(s)) q += 8;
-  if (/normalize-space\s*\(/.test(s)) q += 8;
-  if (/@(data-testid|data-cy|data-test|aria-label|name|placeholder|alt|title)/.test(s)) q += 10;
-  if (/@id\b/.test(s) && !/@id\b.*\d{4}/.test(s)) q += 8;
+  const ic = (s.match(/\[\d+\]/g) || []).length + (s.match(/:nth-child/g) || []).length;
+  
+  if (s.startsWith('/html') || isIndexOnlyXp(s)) q -= 70;
+  if (ic >= 3) q -= 50; else if (ic === 2) q -= 30; else if (ic === 1) q -= 15;
+  
+  if (loc.category === 'test' || s.includes('data-testid')) q += 20;
+  if (loc.category === 'text' || loc.label.includes('text')) q += 15;
+  if (s.includes('aria-label') || s.includes('name=')) q += 8;
+  
   return q;
+};
+
+const getBestLocator = (locs) => {
+  if (!locs || !locs.length) return null;
+  const candidates = locs.filter(l => l.matchCount === 1);
+  if (!candidates.length) return locs[0];
+  const sorted = [...candidates].sort((a, b) => dynamicQ(b) - dynamicQ(a));
+  return sorted[0];
 };
 
 const getRecommendedXPath = (data) => {
@@ -178,11 +188,7 @@ const getRecommendedXPath = (data) => {
 
 const getRecommendedCSS = (data) => {
   const candidates = data.locators.filter((l) => l.selectorType === 'css' && l.matchCount === 1);
-  candidates.sort((a, b) => {
-    const aq = a.score - (a.selector.match(/nth-child/g) || []).length * 10;
-    const bq = b.score - (b.selector.match(/nth-child/g) || []).length * 10;
-    return bq - aq;
-  });
+  candidates.sort((a, b) => dynamicQ(b) - dynamicQ(a));
   return candidates[0] || null;
 };
 
@@ -284,14 +290,31 @@ const scoreGrade = (s) => (s >= 85 ? { cls: 's-a' } : (s >= 70 ? { cls: 's-b' } 
 const catDot = (c) => ({ test: 'dot-test', aria: 'dot-aria', id: 'dot-id', text: 'dot-text', css: 'dot-css', xpath: 'dot-xpath' }[c] || 'dot-xpath');
 
 const renderLocators = (data) => {
-  const locs = data.locators;
-  const best = getRecommendedXPath(data) || getRecommendedCSS(data) || locs.find(l => l.matchCount === 1);
+  const locs = data.locators || [];
+  const best = getBestLocator(locs);
+  
+  // Re-sort the whole list by our improved dynamicQ score
+  const tl = [...locs].sort((a, b) => dynamicQ(b) - dynamicQ(a));
+  
   const bestEl = $('best-card');
   if (best) {
     bestEl.style.display = '';
-    bestEl.innerHTML = `<div class="best-header"><span class="best-label">${esc(best.label)} | ${best.score}%</span></div><div class="best-sel">${esc(best.selector)}</div><div class="best-actions"><button class="sm-btn" data-act="copy">Copy</button><button class="sm-btn" data-act="flash">Flash</button></div>`;
+    bestEl.innerHTML = `
+      <div class="best-header">
+        <div class="best-badge">${esc(best.selectorType.toUpperCase())}</div>
+        <div class="best-label"><strong>${esc(best.category.toUpperCase())}</strong>: ${esc(best.label)}</div>
+        <div class="loc-score s-${best.score >= 80 ? 'a' : (best.score >= 60 ? 'c' : 'f')}">${best.score}%</div>
+      </div>
+      <div class="best-sel">${esc(best.selector)}</div>
+      <div class="best-actions">
+        <button class="sm-btn active" data-act="copy">Copy</button>
+        <button class="sm-btn" data-act="flash">Flash</button>
+        <button class="sm-btn" data-act="highlight">Highlight</button>
+      </div>
+    `;
     bestEl.querySelector('[data-act="copy"]').onclick = function() { copyText(best.selector, this); };
     bestEl.querySelector('[data-act="flash"]').onclick = function() { toggleFlash('flash', best, this); };
+    bestEl.querySelector('[data-act="highlight"]').onclick = function() { toggleFlash('highlight', best, this); };
   } else { bestEl.style.display = 'none'; }
   ['stable', 'moderate', 'fragile'].forEach((tier) => {
     const container = $(`tier-${tier}`); const hd = $(`tier-${tier}-hd`); container.innerHTML = '';
@@ -314,9 +337,10 @@ const buildLocCard = (data, loc, isBest) => {
   head.innerHTML = hh;
   head.addEventListener('click', () => { card.classList.toggle('open'); });
   const cbody = document.createElement('div'); cbody.className = 'loc-cbody';
-  cbody.innerHTML = `<div class="loc-sel">${esc(loc.selector)}</div><div class="loc-actions"><button class="sm-btn" data-act="copy">Copy</button><button class="sm-btn" data-act="flash">Flash</button><button class="sm-btn" data-act="copy-for">Copy for...</button></div><div class="fw-grid" style="display:none"></div>`;
+  cbody.innerHTML = `<div class="loc-sel">${esc(loc.selector)}</div><div class="loc-actions"><button class="sm-btn" data-act="copy">Copy</button><button class="sm-btn" data-act="flash">Flash</button><button class="sm-btn" data-act="highlight">Highlight</button><button class="sm-btn" data-act="copy-for">Copy for...</button></div><div class="fw-grid" style="display:none"></div>`;
   cbody.querySelector('[data-act="copy"]').onclick = function() { copyText(loc.selector, this); };
   cbody.querySelector('[data-act="flash"]').onclick = function() { toggleFlash('flash', loc, this); };
+  cbody.querySelector('[data-act="highlight"]').onclick = function() { toggleFlash('highlight', loc, this); };
   cbody.querySelector('[data-act="copy-for"]').onclick = () => { const g = cbody.querySelector('.fw-grid'); g.style.display = g.style.display === 'none' ? 'flex' : 'none'; };
   const fwGrid = cbody.querySelector('.fw-grid');
   FW_LIST.forEach(fw => {
@@ -355,10 +379,17 @@ const updateStackUI = () => {
   const list = $('stack-list'); list.innerHTML = '';
   st.stack.forEach((item, i) => {
     const row = document.createElement('div'); row.className = 'stack-row';
-    row.innerHTML = `<span class="stack-idx">${i + 1}</span><span class="stack-info">&lt;${esc(item.tag)}&gt; ${esc(item.selector.slice(0, 40))}</span>`;
-    const rmBtn = document.createElement('button'); rmBtn.className = 'sm-btn'; rmBtn.textContent = 'x';
+    row.innerHTML = `<span class="stack-idx">${i + 1}</span><span class="stack-info" title="${esc(item.selector)}">&lt;${esc(item.tag)}&gt; ${esc(item.selector.slice(0, 35))}...</span>`;
+    
+    const hlBtn = document.createElement('button'); hlBtn.className = 'sm-btn'; hlBtn.textContent = 'Highlight';
+    hlBtn.onclick = function() { toggleFlash('highlight', item, this); };
+    
+    const rmBtn = document.createElement('button'); rmBtn.className = 'sm-btn'; rmBtn.textContent = '×';
     rmBtn.onclick = () => { st.stack.splice(i, 1); updateStackUI(); };
-    row.appendChild(rmBtn); list.appendChild(row);
+    
+    row.appendChild(hlBtn);
+    row.appendChild(rmBtn);
+    list.appendChild(row);
   });
 };
 
@@ -426,7 +457,7 @@ $('btn-passive').onclick = () => { st.passive = !st.passive; $('btn-passive').cl
 $('btn-lock').onclick = () => { st.locked = !st.locked; $('btn-lock').classList.toggle('on-lock', st.locked); safeSend({ type: 'setLock', enabled: st.locked }); };
 $('btn-theme').onclick = () => { const theme = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'; document.documentElement.setAttribute('data-theme', theme); localStorage.setItem(THEME_KEY, theme); };
 $('btn-unbind').onclick = () => safeSend({ type: 'unbindTab' });
-$('btn-add-stack').onclick = () => { if (!st.payload) return; const best = getRecommendedXPath(st.payload) || st.payload.locators[0]; if (st.stack.some(s => s.selector === best.selector)) return; st.stack.push({ tag: st.payload.tag, text: st.payload.textContent, selector: best.selector, selectorType: best.selectorType, attrs: st.payload.attributes }); updateStackUI(); };
+$('btn-add-stack').onclick = () => { if (!st.payload) return; const best = getBestLocator(st.payload.locators); if (!best || st.stack.some(s => s.selector === best.selector)) return; st.stack.push({ tag: st.payload.tag, text: st.payload.textContent, selector: best.selector, selectorType: best.selectorType, attrs: st.payload.attributes }); updateStackUI(); };
 $('btn-clear-stack').onclick = () => { st.stack = []; updateStackUI(); $('pom-picker').style.display = 'none'; };
 $('btn-export-pom').onclick = () => { const p = $('pom-picker'); p.style.display = p.style.display === 'none' ? 'flex' : 'none'; };
 document.querySelectorAll('.pom-btn').forEach(btn => { btn.onclick = function() { if (!st.stack.length) return; copyText(generatePOM(st.stack, this.dataset.fw), this); }; });
