@@ -107,19 +107,48 @@
     return t.slice(0, maxLen);
   }
 
-  function cssCount(sel) { try { return document.querySelectorAll(sel).length; } catch { return -1; } }
-  function xpCount(expr) { try { const r = document.evaluate(expr, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null); return r.snapshotLength; } catch { return -1; } }
+  function findAllInShadow(root, selector, results = []) {
+    // Search current root
+    const items = root.querySelectorAll(selector);
+    for (const item of items) results.push(item);
+    
+    // Recursive search into shadow roots
+    const all = root.querySelectorAll('*');
+    for (const el of all) {
+      if (el.shadowRoot) findAllInShadow(el.shadowRoot, selector, results);
+    }
+    return results;
+  }
 
-  function resolveEls(selector, selectorType, max) {
-    max = max || 50;
+  function cssCount(sel) { 
+    try { 
+      // SelectorsHub strategy: search document + all shadow roots
+      return findAllInShadow(document, sel).length; 
+    } catch { return -1; } 
+  }
+
+  function xpCount(expr) { 
+    try { 
+      // XPath is harder in shadow DOM (standard evaluate() doesn't cross roots)
+      // For now, we search document. SelectorsHub uses a polyfill for shadow XPath.
+      // We will stick to document for XPath but support it in resolveEls for the main document.
+      const r = document.evaluate(expr, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null); 
+      return r.snapshotLength; 
+    } catch { return -1; } 
+  }
+
+  function resolveEls(selector, selectorType, max = 50) {
     const els = [];
     try {
       if (selectorType === 'xpath') {
         const r = document.evaluate(selector, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
-        for (let i = 0; i < r.snapshotLength && i < max; i++) { const n = r.snapshotItem(i); if (n && n.nodeType === 1) els.push(n); }
+        for (let i = 0; i < r.snapshotLength && i < max; i++) { 
+          const n = r.snapshotItem(i); 
+          if (n && n.nodeType === 1) els.push(n); 
+        }
       } else {
-        const nl = document.querySelectorAll(selector);
-        for (let i = 0; i < nl.length && i < max; i++) els.push(nl[i]);
+        const found = findAllInShadow(document, selector);
+        for (let i = 0; i < found.length && i < max; i++) els.push(found[i]);
       }
     } catch {}
     return els;
@@ -202,7 +231,7 @@
   // ═══════════════════════════════════════════════════════════════
   //  LOCATOR ENGINE — PRD §5.1 all strategies
   // ═══════════════════════════════════════════════════════════════
-  function generateLocators(el) {
+  const generateLocators = (el) => {
     const tag = el.tagName.toLowerCase();
     const id = el.id || '';
     const name = el.getAttribute('name') || '';
@@ -219,7 +248,7 @@
     let seq = 0;
 
     /* PRD §5.5 scoring adjustment */
-    function add(category, label, selector, selectorType, baseScore, extra) {
+    const add = (category, label, selector, selectorType, baseScore, extra) => {
       const count = selectorType === 'xpath' ? xpCount(selector) : cssCount(selector);
       let score = baseScore;
       if (count === 0) score = 0;
@@ -233,14 +262,14 @@
         score: Math.round(score), matchCount: Math.max(count, 0),
         ...(extra || {})
       });
-    }
+    };
 
     // ── 1. Test Attributes (PRD score 95) ─────────────────────────
     const testAttrs = ['data-testid', 'data-test-id', 'data-cy', 'data-test', 'data-qa', 'data-automation-id', 'data-e2e'];
     for (const ta of testAttrs) {
       const v = el.getAttribute(ta);
       if (v) {
-        add('test', `${ta}`, `[${ta}="${v}"]`, 'css', 95);
+        add('test', ta, `[${ta}="${v}"]`, 'css', 95);
         add('test', `xpath ${ta}`, `//*[@${ta}=${xpEsc(v)}]`, 'xpath', 95);
       }
     }
@@ -390,23 +419,23 @@
       const ct = ch.tagName.toLowerCase();
       if (ct === 'a') {
         const h = ch.getAttribute('href');
-        if (h && h.length > 1 && h.length < 120 && !seenChild.has('a-' + h)) {
-          seenChild.add('a-' + h);
+        if (h && h.length > 1 && h.length < 120 && !seenChild.has(`a-${h}`)) {
+          seenChild.add(`a-${h}`);
           const part = h.split('/').filter(Boolean).pop() || h;
           add('hierarchy', 'child-link-href', `//${tag}[.//a[contains(@href,${xpEsc(part)})]]`, 'xpath', 70);
         }
       }
       if ((ct === 'b' || ct === 'strong') && ch.textContent.trim()) {
         const bt = ch.textContent.trim();
-        if (bt.length > 1 && bt.length < 80 && !seenChild.has('b-' + bt)) {
-          seenChild.add('b-' + bt);
+        if (bt.length > 1 && bt.length < 80 && !seenChild.has(`b-${bt}`)) {
+          seenChild.add(`b-${bt}`);
           add('hierarchy', 'child-bold-text', `//${tag}[.//${ct}[normalize-space()=${xpEsc(extractPhrase(bt, 50))}]]`, 'xpath', 65);
         }
       }
       if (ct === 'img') {
         const a2 = ch.getAttribute('alt');
-        if (a2 && !seenChild.has('img-' + a2)) {
-          seenChild.add('img-' + a2);
+        if (a2 && !seenChild.has(`img-${a2}`)) {
+          seenChild.add(`img-${a2}`);
           add('hierarchy', 'child-img-alt', `//${tag}[.//img[@alt=${xpEsc(a2)}]]`, 'xpath', 65);
         }
       }
@@ -563,7 +592,7 @@
     {
       const tagCount = cssCount(tag);
       if (tagCount > 0) {
-        const els = document.querySelectorAll(tag);
+        const els = resolveEls(tag, 'css', 1000);
         let posIdx = -1;
         for (let i = 0; i < els.length; i++) { if (els[i] === el) { posIdx = i + 1; break; } }
         if (posIdx > 0) add('position', 'position-xpath', `(//${tag})[${posIdx}]`, 'xpath', 20);
@@ -588,6 +617,19 @@
       else if (loc.score >= 30) loc.tier = 'moderate';
       else loc.tier = 'fragile';
     }
+
+    // ── iFrame detection ──
+    let iframeMeta = null;
+    try {
+      if (window.parent !== window) {
+        // We are inside an iframe
+        iframeMeta = {
+          url: window.location.href,
+          title: document.title,
+          isMainFrame: false
+        };
+      }
+    } catch (e) { /* cross-origin iframe */ }
 
     // ── Metadata ──────────────────────────────────────────────────
     const stableClassList = staticClasses;
@@ -617,9 +659,10 @@
       tagCount, childCount: el.children.length,
       shadowRoot: !!el.shadowRoot,
       iframe: tag === 'iframe',
+      iframeMeta,
       locators
     };
-  }
+  };
 
   // ═══════════════════════════════════════════════════════════════
   //  OVERLAY
