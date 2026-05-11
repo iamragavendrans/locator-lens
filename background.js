@@ -6,7 +6,7 @@ chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 let panelPort = null;
 let boundTabId = null;
 
-async function injectIfNeeded(tabId) {
+const injectIfNeeded = async (tabId) => {
   try {
     const r = await chrome.tabs.sendMessage(tabId, { type: 'ping' });
     if (r && r.pong) return true;
@@ -20,9 +20,9 @@ async function injectIfNeeded(tabId) {
     console.warn('[LL] inject failed:', err.message);
     return false;
   }
-}
+};
 
-async function getTargetTab(msg) {
+const getTargetTab = async (msg) => {
   if (msg.type === 'bindTab') {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (tab && tab.id) {
@@ -55,11 +55,46 @@ async function getTargetTab(msg) {
 
   if (boundTabId) {
     try { return await chrome.tabs.get(boundTabId); }
-    catch (_) { boundTabId = null; if (panelPort) panelPort.postMessage({ type: 'tabUnbound' }); return null; }
+    catch (_) { 
+      boundTabId = null; 
+      if (panelPort) panelPort.postMessage({ type: 'tabUnbound' }); 
+      return null; 
+    }
   }
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   return tab || null;
-}
+};
+
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.contextMenus.create({
+    id: 'll-inspect',
+    title: 'Inspect with LocatorLens',
+    contexts: ['all']
+  });
+});
+
+chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+  if (info.menuItemId === 'll-inspect' && tab.id) {
+    await chrome.sidePanel.open({ tabId: tab.id });
+    const ok = await injectIfNeeded(tab.id);
+    if (ok) {
+      chrome.tabs.sendMessage(tab.id, { type: 'inspectClicked' });
+    }
+  }
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (tabId === boundTabId && changeInfo.url) {
+    if (panelPort) panelPort.postMessage({ type: 'tabBound', tabId, url: changeInfo.url });
+  }
+});
+
+chrome.tabs.onActivated.addListener(async (activeInfo) => {
+  if (!boundTabId) {
+    const tab = await chrome.tabs.get(activeInfo.tabId);
+    if (panelPort) panelPort.postMessage({ type: 'tabUnbound' }); // Show as unbound by default on switch
+  }
+});
 
 chrome.runtime.onConnect.addListener(port => {
   if (port.name !== 'locatorlens') return;
@@ -67,10 +102,14 @@ chrome.runtime.onConnect.addListener(port => {
 
   port.onMessage.addListener(async msg => {
     const tab = await getTargetTab(msg);
-    if (tab === null && ['bindTab','unbindTab','getTabState'].includes(msg.type)) return;
-    if (!tab || !tab.id) { port.postMessage({ type: 'error', message: 'No active tab found.' }); return; }
+    if (tab === null && ['bindTab', 'unbindTab', 'getTabState'].includes(msg.type)) return;
+    if (!tab || !tab.id) { 
+      port.postMessage({ type: 'error', message: 'No active tab found.' }); 
+      return; 
+    }
     if (tab.url && /^(chrome|edge|about|devtools):/.test(tab.url)) {
-      port.postMessage({ type: 'error', message: 'Cannot run on browser-internal pages.' }); return;
+      port.postMessage({ type: 'error', message: 'Cannot run on browser-internal pages.' }); 
+      return;
     }
 
     // Auto-bind on startPicking or setPassive
@@ -80,10 +119,13 @@ chrome.runtime.onConnect.addListener(port => {
     }
 
     const ok = await injectIfNeeded(tab.id);
-    if (!ok) { port.postMessage({ type: 'error', message: 'Cannot inject into this page.' }); return; }
+    if (!ok) { 
+      port.postMessage({ type: 'error', message: 'Cannot inject into this page.' }); 
+      return; 
+    }
 
     const relayed = [
-      'startPicking', 'stopPicking', 'setPassive', 'setLock',
+      'startPicking', 'stopPicking', 'setPassive', 'setMultiPick', 'setLock',
       'flashLocator', 'highlightLocator', 'clearFlash',
       'navigateMatch', 'validateSelector'
     ];
@@ -92,7 +134,9 @@ chrome.runtime.onConnect.addListener(port => {
         const result = await chrome.tabs.sendMessage(tab.id, msg);
         if (msg.type === 'validateSelector' && result) port.postMessage({ type: 'validateResult', ...result });
         if (msg.type === 'navigateMatch' && result) port.postMessage({ type: 'navigateResult', ...result });
-      } catch (err) { port.postMessage({ type: 'error', message: 'Page not responding: ' + err.message }); }
+      } catch (err) { 
+        port.postMessage({ type: 'error', message: 'Page not responding: ' + err.message }); 
+      }
     }
   });
 
@@ -109,5 +153,7 @@ chrome.tabs.onRemoved.addListener(tabId => {
 chrome.runtime.onMessage.addListener((msg, sender) => {
   if (!panelPort) return;
   if (boundTabId && sender.tab && sender.tab.id !== boundTabId) return;
-  if (msg.type === 'locatorsGenerated' || msg.type === 'pickingCancelled') panelPort.postMessage(msg);
+  if (msg.type === 'locatorsGenerated' || msg.type === 'pickingCancelled') {
+    panelPort.postMessage(msg);
+  }
 });

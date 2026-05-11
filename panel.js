@@ -39,27 +39,47 @@ const safeSend = (msg) => {
 
 connectPort();
 
-const st = { picking: false, passive: false, locked: false, payload: null, stack: [], activeFlash: null };
+// ═══════════════════════════════════════════════════════
+//  Tab Navigation
+// ═══════════════════════════════════════════════════════
+document.querySelectorAll('.tab-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn, .tab-pane').forEach((el) => el.classList.remove('active'));
+    btn.classList.add('active');
+    $(btn.dataset.tab).classList.add('active');
+  });
+  btn.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+      const tabs = Array.from(document.querySelectorAll('.tab-btn'));
+      const idx = tabs.indexOf(btn);
+      const next = (idx + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+      tabs[next].focus();
+      tabs[next].click();
+    }
+  });
+});
+
+const st = { picking: false, passive: false, multi: false, locked: false, payload: null, stack: [], recents: [], activeFlash: null };
 
 // ═══════════════════════════════════════════════════════
-//  Section persistence
-// ═══════════════════════════════════════════════════════
-const SEC_KEY = 'll5_sections';
-const loadSectionState = () => { try { return JSON.parse(localStorage.getItem(SEC_KEY)) || {}; } catch(e) { return {}; } };
-const saveSectionState = () => {
-  const state = {};
-  document.querySelectorAll('.sec').forEach((s) => { state[s.id] = s.open; });
-  try { localStorage.setItem(SEC_KEY, JSON.stringify(state)); } catch(e) {}
-};
-const applySectionState = () => {
-  const saved = loadSectionState();
-  const defaults = { 'sec-reference': true, 'sec-properties': false, 'sec-locators': true, 'sec-stack': false, 'sec-validator': false };
-  document.querySelectorAll('.sec').forEach((s) => {
-    s.open = saved[s.id] !== undefined ? saved[s.id] : (defaults[s.id] || false);
-  });
 };
 document.querySelectorAll('.sec').forEach((s) => { s.addEventListener('toggle', saveSectionState); });
-applySectionState();
+// ═══════════════════════════════════════════════════════
+//  Theme management
+// ═══════════════════════════════════════════════════════
+const THEME_KEY = 'll5_theme';
+const loadTheme = () => {
+  const theme = localStorage.getItem(THEME_KEY) || 'dark';
+  document.documentElement.setAttribute('data-theme', theme);
+  return theme;
+};
+let currentTheme = loadTheme();
+
+$('btn-theme').addEventListener('click', () => {
+  currentTheme = currentTheme === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', currentTheme);
+  localStorage.setItem(THEME_KEY, currentTheme);
+});
 
 // ═══════════════════════════════════════════════════════
 //  Framework templates (unchanged)
@@ -88,7 +108,18 @@ const FW_LIST=[{key:'playwright',label:'Playwright TS'},{key:'selenium',label:'S
 const viewIds = ['v-idle','v-picking','v-error','v-results'];
 const showView = (id) => { viewIds.forEach((v) => { $(v).style.display='none'; }); $(id).style.display=''; };
 const esc = (s) => { const d=document.createElement('div'); d.textContent=s; return d.innerHTML; };
-const copyText = (text, btn) => { navigator.clipboard.writeText(text).then(() => { if(!btn) return; const p=btn.textContent; btn.textContent='Copied'; setTimeout(() => { btn.textContent=p; }, 900); }).catch(() => {}); };
+const copyText = (text, btn) => {
+  navigator.clipboard.writeText(text).then(() => {
+    if (!btn) return;
+    const old = btn.innerHTML;
+    btn.classList.add('copy-success');
+    btn.innerHTML = '<span class="copy-check">✓</span> Copied';
+    setTimeout(() => {
+      btn.classList.remove('copy-success');
+      btn.innerHTML = old;
+    }, 1200);
+  }).catch(() => {});
+};
 
 // ═══════════════════════════════════════════════════════
 //  PICK
@@ -110,6 +141,12 @@ const updatePickBtn = () => {
     b.innerHTML = '<svg width="11" height="11" viewBox="0 0 12 12" fill="none"><circle cx="6" cy="6" r="5" stroke="currentColor" stroke-width="1.5"/><line x1="6" y1="1" x2="6" y2="11" stroke="currentColor" stroke-width="1.5"/><line x1="1" y1="6" x2="11" y2="6" stroke="currentColor" stroke-width="1.5"/></svg> +Pick';
   }
 };
+
+$('btn-multi').addEventListener('click', () => {
+  st.multi = !st.multi;
+  $('btn-multi').classList.toggle('active', st.multi);
+  safeSend({ type: 'setMultiPick', enabled: st.multi });
+});
 
 // ═══════════════════════════════════════════════════════
 //  PASSIVE — color toggle only
@@ -149,14 +186,12 @@ const updateTabBar = (bound, url) => {
 };
 
 // ═══════════════════════════════════════════════════════
-//  STACK BUTTON
+//  STACK BUTTON (Quick Tab Switch)
 // ═══════════════════════════════════════════════════════
 $('btn-stack').addEventListener('click', () => {
-  const sec = $('sec-stack');
-  sec.open = !sec.open;
-  $('btn-stack').classList.toggle('on-stack', sec.open);
-  if (sec.open) sec.scrollIntoView({ behavior: 'smooth' });
-  saveSectionState();
+  document.querySelectorAll('.tab-btn, .tab-pane').forEach((el) => el.classList.remove('active'));
+  document.querySelector('[data-tab="tab-stack"]').classList.add('active');
+  $('tab-stack').classList.add('active');
 });
 
 // ═══════════════════════════════════════════════════════
@@ -167,18 +202,33 @@ const onPortMessage = (msg) => {
     if (msg.type === 'tabBound') { updateTabBar(true, msg.url); return; }
     if (msg.type === 'tabUnbound') { updateTabBar(false, ''); return; }
     if (msg.type === 'locatorsGenerated') {
-      if (st.locked) return;
+      if (st.multi) {
+        // Direct to stack in multi-mode
+        const best = msg.payload.locators.find(l => l.matchCount === 1) || msg.payload.locators[0];
+        st.stack.push({ tag: msg.payload.tag, text: msg.payload.textContent || '', selector: best.selector, selectorType: best.selectorType, id: msg.payload.id, ariaLabel: msg.payload.ariaLabel, role: msg.payload.role, attrs: msg.payload.attributes });
+        updateStackUI();
+        return;
+      }
       if (st.picking) { st.picking = false; updatePickBtn(); }
       st.payload = msg.payload;
+      
+      // Update recents
+      const entry = { tag: msg.payload.tag, text: (msg.payload.textContent || '').slice(0, 30), payload: msg.payload, timestamp: Date.now() };
+      st.recents = [entry, ...st.recents.filter(r => r.payload.id !== msg.payload.id || !r.payload.id)].slice(0, 8);
+      
       renderAll(msg.payload);
       showView('v-results');
       $('btn-lock').disabled = false;
-      $('sec-reference').open = true;
-      $('sec-locators').open = true;
-      saveSectionState();
       return;
     }
-    if (msg.type === 'pickingCancelled') {
+    if (msg.type === 'tabUnbound') {
+      st.payload = null;
+      showView('v-idle');
+      $('btn-lock').disabled = true;
+      $('btn-lock').classList.remove('on-lock');
+      st.locked = false;
+      return;
+    }
       st.picking = false;
       updatePickBtn();
       showView(st.payload ? 'v-results' : 'v-idle');
@@ -204,7 +254,40 @@ const renderAll = (data) => {
   renderReference(data);
   renderProperties(data);
   renderLocators(data);
+  renderRecents();
+  renderBreadcrumbs(data.path);
   updateStackUI();
+};
+
+const renderBreadcrumbs = (path) => {
+  const container = $('breadcrumbs');
+  container.innerHTML = '';
+  if (!path || !path.length) return;
+  
+  path.forEach((p, i) => {
+    const crumb = document.createElement('span');
+    crumb.className = 'crumb' + (i === path.length - 1 ? ' crumb-active' : '');
+    crumb.textContent = p.tag + (p.id ? `#${p.id}` : '');
+    container.appendChild(crumb);
+  });
+  container.scrollLeft = container.scrollWidth;
+};
+
+const renderRecents = () => {
+  const list = $('recents-list');
+  list.innerHTML = '';
+  if (!st.recents.length) { list.innerHTML = '<div class="v-sub" style="padding:10px">No recent items</div>'; return; }
+  
+  st.recents.forEach((r) => {
+    const d = document.createElement('div');
+    d.className = 'recent-item';
+    d.innerHTML = `<span class="recent-tag">&lt;${esc(r.tag)}&gt;</span><span class="recent-text">${esc(r.text)}</span>`;
+    d.addEventListener('click', () => {
+      st.payload = r.payload;
+      renderAll(r.payload);
+    });
+    list.appendChild(d);
+  });
 };
 
 // ═══════════════════════════════════════════════════════
@@ -289,6 +372,11 @@ const renderReference = (data) => {
     ['aria-label', data.ariaLabel || '', ariaLoc ? ariaLoc.matchCount : 0, false],
     ['Link Text', data.linkText || '', linkLoc ? linkLoc.matchCount : 0, false]
   ];
+
+  if (data.isInShadow) rows.push(['Shadow DOM', data.shadowHost ? `Inside <${data.shadowHost}>` : 'Yes', 0, false]);
+  if (data.shadowRoot) rows.push(['Shadow Host', 'Yes', 0, false]);
+  if (data.iframeMeta) rows.push(['iFrame', data.iframeMeta.title || 'Yes', 0, false]);
+  if (data.tag === 'iframe') rows.push(['iFrame Host', 'Yes', 0, false]);
   
   rows.forEach((r) => {
     const k = document.createElement('span');
@@ -424,10 +512,10 @@ const renderLocators = (data) => {
   const bestEl = $('best-card');
   
   if (best) {
-    const locMeta = buildLocMeta(data, best);
+    const gred = scoreGrade(best.score);
     bestEl.style.display = '';
     bestEl.innerHTML = `
-      <div class="best-header"><span class="best-badge">&#10003;</span><span class="best-label">${esc(best.label)} | ${best.score}% | unique</span></div>
+      <div class="best-header"><span class="best-label">${esc(best.label)} | ${best.score}% | unique</span></div>
       <div class="best-sel">${esc(best.selector)}</div>
       <div class="best-actions">
         <button class="sm-btn" data-act="copy-raw">Copy</button>
@@ -469,9 +557,14 @@ const buildLocMeta = (d, l) => ({
   _stableId: d.id && d.locators.some((x) => x.category === 'id' && x.label === 'id')
 });
 
-const scoreGrade = (s) => s >= 80 ? 's-a' : s >= 65 ? 's-b' : s >= 45 ? 's-c' : s >= 30 ? 's-d' : 's-f';
+const scoreGrade = (s) => {
+  if (s >= 85) return { cls: 's-a' };
+  if (s >= 70) return { cls: 's-b' };
+  if (s >= 50) return { cls: 's-c' };
+  return { cls: '' };
+};
 const catDot = (c) => {
-  const m = { test: 'dot-test', aria: 'dot-aria', id: 'dot-id', attr: 'dot-attr', 'class': 'dot-class', text: 'dot-text', hierarchy: 'dot-hierarchy', logical: 'dot-logical', css: 'dot-css', xpath: 'dot-xpath', position: 'dot-position', absolute: 'dot-absolute' };
+  const m = { test: 'dot-test', playwright: 'dot-playwright', aria: 'dot-aria', id: 'dot-id', attr: 'dot-attr', 'class': 'dot-class', text: 'dot-text', hierarchy: 'dot-hierarchy', logical: 'dot-logical', css: 'dot-css', xpath: 'dot-xpath', position: 'dot-position', absolute: 'dot-absolute' };
   return m[c] || 'dot-xpath';
 };
 
@@ -483,9 +576,10 @@ const buildLocCard = (data, loc, isBest) => {
   const head = document.createElement('div');
   head.className = 'loc-head';
   
+  const gred = scoreGrade(loc.score);
   let hh = `<span class="loc-dot ${catDot(loc.category)}"></span><span class="loc-info">${esc(loc.category)} ${esc(loc.label)}</span>`;
   if (isBest) hh += '<span class="loc-best-pill">Recommended</span>';
-  hh += `<span class="loc-score ${scoreGrade(loc.score)}">${loc.score}</span>`;
+  hh += `<span class="loc-score ${gred.cls}">${loc.score}%</span>`;
   const mc = loc.matchCount === 1 ? 'm-unique' : (loc.matchCount > 1 ? 'm-multi' : 'm-zero');
   hh += `<span class="loc-match ${mc}">${loc.matchCount === 1 ? '1' : loc.matchCount}</span>`;
   
@@ -572,7 +666,9 @@ $('btn-export-pom').addEventListener('click', () => {
 });
 
 const updateStackUI = () => {
-  $('stack-count').textContent = st.stack.length;
+  const count = st.stack.length;
+  $('stack-count').textContent = count;
+  $('stack-count-badge').textContent = count;
   const list = $('stack-list');
   list.innerHTML = '';
   st.stack.forEach((item, i) => {

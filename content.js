@@ -109,12 +109,15 @@
 
   function findAllInShadow(root, selector, results = []) {
     // Search current root
-    const items = root.querySelectorAll(selector);
-    for (const item of items) results.push(item);
+    try {
+      const items = root.querySelectorAll(selector);
+      for (const item of items) results.push(item);
+    } catch(e) {}
     
     // Recursive search into shadow roots
-    const all = root.querySelectorAll('*');
-    for (const el of all) {
+    // Optimization: only check elements that could potentially have a shadow root
+    const hosts = root.querySelectorAll('*');
+    for (const el of hosts) {
       if (el.shadowRoot) findAllInShadow(el.shadowRoot, selector, results);
     }
     return results;
@@ -249,7 +252,11 @@
 
     /* PRD §5.5 scoring adjustment */
     const add = (category, label, selector, selectorType, baseScore, extra) => {
-      const count = selectorType === 'xpath' ? xpCount(selector) : cssCount(selector);
+      let count = -1;
+      if (selectorType === 'xpath') count = xpCount(selector);
+      else if (selectorType === 'css') count = cssCount(selector);
+      else if (selectorType === 'pw') count = 1; // Playwright getBy are assume-unique for now
+      
       let score = baseScore;
       if (count === 0) score = 0;
       else if (count === 1) { /* base score stands */ }
@@ -532,25 +539,42 @@
     {
       const chain = [];
       let cur = el, depth = 0, anchorScore = 30;
+      const rootNode = el.getRootNode();
+      const isShadow = rootNode instanceof ShadowRoot;
       while (cur && cur !== document.body && cur !== document.documentElement && depth < 10) {
         const ct = cur.tagName.toLowerCase();
         const ci = nthIndex(cur);
         let seg = `${ct}:nth-child(${ci})`;
+        
         // Check for anchor
         const cTestAttr = testAttrs.find(a => cur.getAttribute(a));
         if (cTestAttr) { seg = `[${cTestAttr}="${cur.getAttribute(cTestAttr)}"]`; anchorScore = 82; chain.unshift(seg); break; }
         if (cur.id && isStableId(cur.id)) { seg = `#${cssEsc(cur.id)}`; anchorScore = 78; chain.unshift(seg); break; }
-        if (cur.getAttribute('aria-label')) { seg = `[aria-label="${cur.getAttribute('aria-label')}"]`; anchorScore = 75; chain.unshift(seg); break; }
+        
         chain.unshift(seg);
-        // Check if unique already
+        
+        // Check if unique already WITHIN its root
         const candidate = chain.join(' > ');
-        if (cssCount(candidate) === 1) { anchorScore = Math.max(anchorScore, 50); break; }
+        const countInRoot = rootNode.querySelectorAll(candidate).length;
+        if (countInRoot === 1) { 
+          anchorScore = Math.max(anchorScore, 50); 
+          break; 
+        }
+        
         cur = cur.parentElement;
         depth++;
       }
+      
       if (chain.length > 0) {
-        const cssPath = chain.join(' > ');
-        add('css', 'css-path', cssPath, 'css', anchorScore);
+        let cssPath = chain.join(' > ');
+        if (isShadow && rootNode.host) {
+          const hostTag = rootNode.host.tagName.toLowerCase();
+          // Generate a Playwright-friendly pierced selector
+          const pierced = `${hostTag} >> css=${cssPath}`;
+          add('css', 'shadow-css-path', pierced, 'css', anchorScore + 5, { warning: 'Shadow-piercing selector (Playwright style)' });
+        } else {
+          add('css', 'css-path', cssPath, 'css', anchorScore);
+        }
       }
     }
 
@@ -588,7 +612,59 @@
       }
     }
 
-    // ── 23. Position-based XPath (PRD score 20) ───────────────────
+    // ── 23. Playwright getBy... (PRD score 85–98) ────────────────
+    {
+      const pwAdd = (label, selector, score) => {
+        // In a real Playwright scenario, we'd check if this is unique across the whole page.
+        // For simplicity, we assume uniqueness or provide .first() / .nth() if we can detect it.
+        add('playwright', label, selector, 'pw', score);
+      };
+
+      if (ariaLabel) pwAdd('getByLabel', `getByLabel('${ariaLabel}')`, 92);
+      if (role) {
+        let opts = '';
+        if (ariaLabel) opts = `, { name: '${ariaLabel}' }`;
+        else if (placeholder) opts = `, { name: '${placeholder}' }`;
+        pwAdd('getByRole', `getByRole('${role}'${opts})`, 90);
+      }
+      if (placeholder) pwAdd('getByPlaceholder', `getByPlaceholder('${placeholder}')`, 88);
+      if (alt) pwAdd('getByAltText', `getByAltText('${alt}')`, 88);
+      if (title) pwAdd('getByTitle', `getByTitle('${title}')`, 85);
+      if (testAttrs.some(a => el.getAttribute(a))) {
+        const ta = testAttrs.find(a => el.getAttribute(a));
+        pwAdd('getByTestId', `getByTestId('${el.getAttribute(ta)}')`, 98);
+      }
+      if (cleaned && cleaned.length > 1 && cleaned.length < 50) {
+        pwAdd('getByText', `getByText('${cleaned}')`, 85);
+      }
+      
+      // Smart Nth for Playwright
+      const tagCount = cssCount(tag);
+      if (tagCount > 1) {
+        const els = resolveEls(tag, 'css', 100);
+        let posIdx = -1;
+        for (let i = 0; i < els.length; i++) { if (els[i] === el) { posIdx = i; break; } }
+        if (posIdx >= 0) pwAdd('nth-locator', `locator('${tag}').nth(${posIdx})`, 25);
+      }
+    }
+
+    // ── 24. Smart Sibling Anchoring (PRD score 55–65) ─────────────
+    {
+      const sibs = Array.from(el.parentElement ? el.parentElement.children : []);
+      for (const s of sibs) {
+        if (s === el) continue;
+        const sText = cleanText(s.textContent);
+        if (sText && sText.length > 2 && sText.length < 50 && cssCount(`${s.tagName.toLowerCase()}:has-text("${sText}")`) <= 1) {
+          const isFollow = Array.from(el.parentElement.children).indexOf(s) < Array.from(el.parentElement.children).indexOf(el);
+          const axis = isFollow ? 'following-sibling' : 'preceding-sibling';
+          const dist = Math.abs(Array.from(el.parentElement.children).indexOf(s) - Array.from(el.parentElement.children).indexOf(el));
+          add('hierarchy', `smart-${axis}`, `//${s.tagName.toLowerCase()}[normalize-space()=${xpEsc(sText)}]/${axis}::${tag}[${dist}]`, 'xpath', 62);
+          break; // Found one good sibling anchor
+        }
+      }
+    }
+
+    // ── 25. Position-based XPath (PRD score 20) ───────────────────
     {
       const tagCount = cssCount(tag);
       if (tagCount > 0) {
@@ -636,6 +712,14 @@
     const dynamicClassList = dynamicClasses;
     const tagCount = cssCount(tag);
 
+    // ── Breadcrumbs path ──
+    const path = [];
+    let pCur = el;
+    while (pCur && pCur !== document.documentElement) {
+      path.unshift({ tag: pCur.tagName.toLowerCase(), id: pCur.id || null });
+      pCur = pCur.parentElement;
+    }
+
     return {
       tag, id: id || null, name: name || null,
       classes: classList, stableClasses: stableClassList, dynamicClasses: dynamicClassList,
@@ -657,10 +741,13 @@
         tabIndex: el.tabIndex
       },
       tagCount, childCount: el.children.length,
-      shadowRoot: !!el.shadowRoot,
+      shadowRoot: !!el.shadowRoot, // is shadow host
+      isInShadow: el.getRootNode() instanceof ShadowRoot,
+      shadowHost: el.getRootNode() instanceof ShadowRoot ? el.getRootNode().host.tagName.toLowerCase() : null,
       iframe: tag === 'iframe',
       iframeMeta,
-      locators
+      locators,
+      path
     };
   };
 
@@ -736,9 +823,6 @@
     for (const el of els) {
       el.dataset.ll5Prev = el.style.outline || '';
       el.classList.add(FLASH_CLS);
-      el.style.outline = '2px solid #f59e0b';
-      el.style.outlineOffset = '1px';
-      el.style.zIndex = '2147483640';
     }
     if (els[0]) els[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
@@ -762,18 +846,11 @@
       if (el === overlayEl || el === tagEl) return;
       if (excluded.has(el)) return;
       el.classList.add(DIM_CLS);
-      el.style.opacity = '0.2';
-      el.style.transition = 'opacity 0.15s';
     });
     // Highlight targets
     for (const el of els) {
       el.dataset.ll5Prev = el.style.outline || '';
       el.classList.add(HL_CLS);
-      el.style.opacity = '1';
-      el.style.outline = '2px solid #6366f1';
-      el.style.outlineOffset = '2px';
-      el.style.boxShadow = '0 0 0 4px rgba(99,102,241,0.25)';
-      el.style.zIndex = '2147483642';
     }
     if (els[0]) els[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
@@ -781,7 +858,7 @@
   // ═══════════════════════════════════════════════════════════════
   //  PICKER (PRD §4.1 — composedPath)
   // ═══════════════════════════════════════════════════════════════
-  const state = { picking: false, passive: false, lastTarget: null };
+  const state = { picking: false, passive: false, multi: false, lastTarget: null };
 
   function resolveTarget(e) {
     // PRD §4.1: composedPath()[0] for shadow DOM
@@ -803,7 +880,7 @@
     const t = resolveTarget(e);
     if (!t) return;
     flashGreen();
-    stopPick();
+    if (!state.multi) stopPick();
     chrome.runtime.sendMessage({ type: 'locatorsGenerated', payload: generateLocators(t) });
   }
 
@@ -894,6 +971,7 @@
         case 'startPicking': startPick(); sendResponse({ ok: true }); break;
         case 'stopPicking': stopPick(); sendResponse({ ok: true }); break;
         case 'setPassive': state.passive = !!msg.enabled; sendResponse({ ok: true }); break;
+        case 'setMultiPick': state.multi = !!msg.enabled; sendResponse({ ok: true }); break;
         case 'setLock': {
           if (msg.enabled) enableLockMode(); else disableLockMode();
           sendResponse({ ok: true });
@@ -930,6 +1008,13 @@
             }));
           } catch (e) { error = e.message; }
           sendResponse({ selector: msg.selector, selectorType: msg.selectorType, count, error, previews });
+          break;
+        }
+        case 'inspectClicked': {
+          if (state.lastTarget) {
+            chrome.runtime.sendMessage({ type: 'locatorsGenerated', payload: generateLocators(state.lastTarget) });
+          }
+          sendResponse({ ok: true });
           break;
         }
         default: sendResponse({ ok: false });

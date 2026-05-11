@@ -16,7 +16,9 @@
     </div>
     <div class="hdr-btns">
       <button id="btn-passive" class="pill" title="Auto-capture clicks on bound page">Passive</button>
+      <button id="btn-multi" class="pill" title="Multi-Pick: Click multiple elements to add to stack">Multi-Pick</button>
       <button id="btn-lock" class="pill" title="Lock page interactions — prevents UI changes while inspecting" disabled>Lock</button>
+      <button id="btn-theme" class="pill" title="Toggle Dark/Light Mode">Theme</button>
       <button id="btn-stack" class="pill" title="Open Stack section">Stack <span id="stack-count">0</span></button>
       <button id="btn-pick" class="pill pill-primary" title="Pick an element — binds to current tab">
         <svg width="11" height="11" viewBox="0 0 12 12" fill="none"><circle cx="6" cy="6" r="5" stroke="currentColor" stroke-width="1.5"/><line x1="6" y1="1" x2="6" y2="11" stroke="currentColor" stroke-width="1.5"/><line x1="1" y1="6" x2="11" y2="6" stroke="currentColor" stroke-width="1.5"/></svg>
@@ -43,42 +45,65 @@
     <p id="err-msg" class="v-sub"></p>
   </section>
   <div id="v-results" class="results" style="display:none">
-    <details id="sec-reference" class="sec" open><summary class="sec-hd">Reference</summary><div id="ref-grid" class="sec-bd ref-grid"></div></details>
-    <details id="sec-properties" class="sec"><summary class="sec-hd">Properties</summary><div id="props-body" class="sec-bd"></div></details>
-    <details id="sec-locators" class="sec" open>
-      <summary class="sec-hd">Locators <span id="tier-pills" class="tier-pills"></span></summary>
-      <div class="sec-bd loc-body">
+    <nav class="nav-tabs">
+      <button class="tab-btn active" data-tab="tab-locators">Locators</button>
+      <button class="tab-btn" data-tab="tab-val">Validator</button>
+      <button class="tab-btn" data-tab="tab-props">Props</button>
+      <button class="tab-btn" data-tab="tab-stack">Stack <span id="stack-count-badge" class="badge">0</span></button>
+      <button class="tab-btn" data-tab="tab-recents">History</button>
+    </nav>
+
+    <div class="tab-content-container">
+      <div id="tab-locators" class="tab-pane active">
+        <div id="breadcrumbs" class="breadcrumbs"></div>
         <div id="best-card" class="best-card" style="display:none"></div>
-        <div id="tier-stable-hd" class="tier-hd tier-stable-hd" style="display:none"></div><div id="tier-stable"></div>
-        <div id="tier-moderate-hd" class="tier-hd tier-moderate-hd" style="display:none"></div><div id="tier-moderate"></div>
-        <div id="tier-fragile-hd" class="tier-hd tier-fragile-hd" style="display:none"></div><div id="tier-fragile"></div>
+        <div class="sec-grid">
+          <div id="tier-stable-hd" class="tier-hd" style="display:none"></div><div id="tier-stable"></div>
+          <div id="tier-moderate-hd" class="tier-hd" style="display:none"></div><div id="tier-moderate"></div>
+          <div id="tier-fragile-hd" class="tier-hd" style="display:none"></div><div id="tier-fragile"></div>
+        </div>
       </div>
-    </details>
-    <details id="sec-stack" class="sec">
-      <summary class="sec-hd">Stack</summary>
-      <div class="sec-bd">
-        <div class="stack-toolbar"><button id="btn-add-stack" class="sm-btn">+ Add current</button><button id="btn-export-pom" class="sm-btn">Export POM</button><button id="btn-clear-stack" class="sm-btn">Clear</button></div>
+      
+      <div id="tab-props" class="tab-pane">
+        <div id="ref-grid" class="ref-grid" style="padding:10px; border-bottom:1px solid var(--bdr)"></div>
+        <div id="props-body" class="props-body"></div>
+      </div>
+
+      <div id="tab-recents" class="tab-pane">
+        <div id="recents-list" class="recents-list"></div>
+      </div>
+
+      <div id="tab-stack" class="tab-pane">
+        <div class="stack-toolbar">
+          <button id="btn-add-stack" class="sm-btn">+ Add Current</button>
+          <button id="btn-export-pom" class="sm-btn">Export POM</button>
+          <button id="btn-clear-stack" class="sm-btn">Clear</button>
+        </div>
         <div id="stack-list" class="stack-list"></div>
         <div id="pom-picker" class="pom-picker" style="display:none">
-          <button class="pom-btn" data-fw="playwright">Playwright TS</button><button class="pom-btn" data-fw="selenium">Selenium Java</button>
-          <button class="pom-btn" data-fw="cypress">Cypress JS</button><button class="pom-btn" data-fw="wdio">WebdriverIO</button>
-          <button class="pom-btn" data-fw="puppeteer">Puppeteer</button><button class="pom-btn" data-fw="testcafe">TestCafe</button><button class="pom-btn" data-fw="raw">Raw JSON</button>
+          <button class="pom-btn" data-fw="playwright">Playwright TS</button>
+          <button class="pom-btn" data-fw="selenium">Selenium Java</button>
+          <button class="pom-btn" data-fw="cypress">Cypress JS</button>
+          <button class="pom-btn" data-fw="wdio">WebdriverIO</button>
+          <button class="pom-btn" data-fw="raw">Raw JSON</button>
         </div>
       </div>
-    </details>
-    <details id="sec-validator" class="sec">
-      <summary class="sec-hd">Live Validator</summary>
-      <div class="sec-bd">
-        <div class="val-row">
-          <span id="val-type-badge" class="val-type-badge">--</span>
-          <input id="val-input" class="val-input" placeholder="Enter CSS or XPath selector..."/>
-          <button id="val-highlight" class="sm-btn" title="Highlight">Highlight</button>
-          <button id="val-flash" class="sm-btn" title="Flash">Flash</button>
+
+      <div id="tab-val" class="tab-pane">
+        <div class="val-container">
+          <div class="val-row">
+            <span id="val-type-badge" class="val-type-badge">--</span>
+            <input id="val-input" class="val-input" placeholder="CSS or XPath..."/>
+          </div>
+          <div class="val-btns">
+            <button id="val-highlight" class="sm-btn">Highlight</button>
+            <button id="val-flash" class="sm-btn">Flash</button>
+          </div>
+          <div id="val-result" class="val-result"></div>
+          <div id="val-preview" class="val-preview"></div>
         </div>
-        <div id="val-result" class="val-result"></div>
-        <div id="val-preview" class="val-preview"></div>
       </div>
-    </details>
+    </div>
   </div>
 </div>
 <div id="color-modal" class="color-modal" style="display:none">
