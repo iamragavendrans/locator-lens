@@ -4,7 +4,7 @@
   "short_name": "LocatorLens",
   "version": "5.0.0",
   "description": "Instant locator generation and ranking for every web element. Built for QA, automation, and scraping.",
-  "permissions": ["activeTab", "storage", "sidePanel", "tabs", "scripting"],
+  "permissions": ["activeTab", "storage", "sidePanel", "tabs", "scripting", "contextMenus"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js" },
   "content_scripts": [{
